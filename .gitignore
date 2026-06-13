@@ -1,0 +1,15 @@
+build/
+*.o
+*.obj
+*.exe
+*.out
+*.app
+*.dSYM/
+server.db
+client_*.db
+messenger_client.db
+.DS_Store
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
