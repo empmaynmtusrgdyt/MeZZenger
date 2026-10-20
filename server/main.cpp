@@ -7,7 +7,7 @@ int main(int argc, char *argv[]) {
     QCoreApplication app(argc, argv);
     
     QCommandLineParser parser;
-    parser.setApplicationDescription("Сервер мессенджера");
+    parser.setApplicationDescription("Сервер MeZZenger");
     parser.addHelpOption();
     parser.addVersionOption();
     

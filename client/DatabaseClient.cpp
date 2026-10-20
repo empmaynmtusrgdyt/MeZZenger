@@ -14,11 +14,18 @@ DatabaseClient::~DatabaseClient() {
 }
 
 bool DatabaseClient::initialize(const QString &dbPath) {
-    Q_UNUSED(dbPath)
-    QString fixedPath = "messenger_client.db";
-    
+    // Миграция после переименования проекта: старая база messenger_client.db -> новая
+    const QString legacyPath = "messenger_client.db";
+    if (!QFile::exists(dbPath) && QFile::exists(legacyPath)) {
+        if (QFile::rename(legacyPath, dbPath)) {
+            qDebug() << "База данных перенесена:" << legacyPath << "->" << dbPath;
+        } else {
+            qWarning() << "Не удалось перенести старую базу данных" << legacyPath;
+        }
+    }
+
     m_db = QSqlDatabase::addDatabase("QSQLITE");
-    m_db.setDatabaseName(fixedPath);
+    m_db.setDatabaseName(dbPath);
 
     if (!m_db.open()) {
         qCritical() << "Не удалось открыть базу данных:" << m_db.lastError().text();

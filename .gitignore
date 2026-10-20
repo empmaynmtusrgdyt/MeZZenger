@@ -7,7 +7,7 @@ build/
 *.dSYM/
 server.db
 client_*.db
-messenger_client.db
+mezzenger_client.db
 .DS_Store
 CMakeCache.txt
 CMakeFiles/

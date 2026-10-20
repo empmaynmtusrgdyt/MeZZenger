@@ -1,4 +1,4 @@
-# Meссenger
+# MeZZenger
 
 Клиент-серверный мессенджер на Qt6/C++17 с графическим интерфейсом, тёмной темой и поддержкой личных сообщений.
 
@@ -29,12 +29,12 @@ cmake --build . -j$(nproc)
 
 Сервер:
 ```bash
-./build/messenger_server [--port 5555]
+./build/mezzenger_server [--port 5555]
 ```
 
 Клиент:
 ```bash
-./build/messenger_client
+./build/mezzenger_client
 ```
 
 ## Лицензия

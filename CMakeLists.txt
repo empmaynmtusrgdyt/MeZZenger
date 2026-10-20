@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(Messenger
+project(MeZZenger
     VERSION 1.0.0
-    DESCRIPTION "Клиент-серверный мессенджер на Qt6/C++17"
+    DESCRIPTION "MeZZenger: клиент-серверный мессенджер на Qt6/C++17"
     LANGUAGES CXX
 )
 
@@ -30,15 +30,15 @@ set(SERVER_SOURCES
     server/ClientHandler.h
 )
 
-add_executable(messenger_server ${SERVER_SOURCES})
+add_executable(mezzenger_server ${SERVER_SOURCES})
 
-target_link_libraries(messenger_server PRIVATE
+target_link_libraries(mezzenger_server PRIVATE
     Qt6::Core
     Qt6::Network
     Qt6::Sql
 )
 
-target_include_directories(messenger_server PRIVATE
+target_include_directories(mezzenger_server PRIVATE
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/common
 )
@@ -56,25 +56,25 @@ set(CLIENT_SOURCES
     client/styles.qss
 )
 
-add_executable(messenger_client ${CLIENT_SOURCES})
+add_executable(mezzenger_client ${CLIENT_SOURCES})
 
-target_link_libraries(messenger_client PRIVATE
+target_link_libraries(mezzenger_client PRIVATE
     Qt6::Core
     Qt6::Network
     Qt6::Widgets
     Qt6::Sql
 )
 
-target_include_directories(messenger_client PRIVATE
+target_include_directories(mezzenger_client PRIVATE
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/common
 )
 
-install(TARGETS messenger_server messenger_client
+install(TARGETS mezzenger_server mezzenger_client
     RUNTIME DESTINATION bin
 )
 
 message(STATUS "Qt6 Version: ${Qt6_VERSION}")
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
-message(STATUS "Server target: messenger_server")
-message(STATUS "Client target: messenger_client")
+message(STATUS "Server target: mezzenger_server")
+message(STATUS "Client target: mezzenger_client")

@@ -7,8 +7,8 @@
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     
-    app.setApplicationName("Messenger");
-    app.setOrganizationName("Messenger");
+    app.setApplicationName("MeZZenger");
+    app.setOrganizationName("MeZZenger");
     app.setApplicationVersion("1.0.0");
     
     app.setStyle(QStyleFactory::create("Fusion"));

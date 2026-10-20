@@ -26,7 +26,7 @@ public:
     explicit DatabaseClient(QObject *parent = nullptr);
     ~DatabaseClient();
 
-    bool initialize(const QString &dbPath = "messenger_client.db");
+    bool initialize(const QString &dbPath = "mezzenger_client.db");
     
     bool saveMessage(int userId, const QString &yourNick, const QString &message, bool isOutgoing);
     bool saveMessage(int userId, const QString &yourNick, const QString &message, 

@@ -11,7 +11,7 @@
 LoginWindow::LoginWindow(QWidget *parent)
     : QMainWindow(parent)
 {
-    setWindowTitle("Мессенджер - Вход");
+    setWindowTitle("MeZZenger - Вход");
     resize(400, 300);
     setupUI();
     applyStyles();
@@ -27,7 +27,7 @@ void LoginWindow::setupUI() {
     mainLayout->setSpacing(20);
     mainLayout->setContentsMargins(30, 30, 30, 30);
 
-    QLabel *titleLabel = new QLabel("Мессенджер");
+    QLabel *titleLabel = new QLabel("MeZZenger");
     titleLabel->setAlignment(Qt::AlignCenter);
     titleLabel->setStyleSheet("font-size: 24px; font-weight: bold; color: #4caf50;");
     mainLayout->addWidget(titleLabel);

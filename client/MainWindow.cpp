@@ -19,10 +19,10 @@ MainWindow::MainWindow(const QString &host, int port, const QString &nick,
     , m_database(new DatabaseClient(this))
 {
     qDebug() << "MainWindow constructor called";
-    setWindowTitle("Мессенджер - " + nick);
+    setWindowTitle("MeZZenger - " + nick);
     resize(900, 600);
     
-    m_database->initialize("messenger_client.db");
+    m_database->initialize("mezzenger_client.db");
     
     setupUI();
     applyStyles();
