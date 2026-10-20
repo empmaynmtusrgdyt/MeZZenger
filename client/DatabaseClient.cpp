@@ -71,7 +71,7 @@ bool DatabaseClient::initialize(const QString &dbPath) {
     }
 
     m_initialized = true;
-    qDebug() << "Единая база данных клиента инициализирована:" << fixedPath;
+    qDebug() << "Единая база данных клиента инициализирована:" << dbPath;
     return true;
 }
 
