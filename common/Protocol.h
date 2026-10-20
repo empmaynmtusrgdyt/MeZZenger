@@ -30,6 +30,7 @@ namespace Protocol {
     inline const QString SUCCESS = "success";
     inline const QString MESSAGE = "message";
     inline const QString USERS = "users";
+    inline const QString FROM_ID = "from_id";
     inline const QString FROM_NICK = "from_nick";
     inline const QString TO_NICK = "to_nick";
     inline const QString TEXT = "text";
@@ -83,9 +84,10 @@ public:
         return obj;
     }
 
-    static QJsonObject createMessageWithTimestamp(const QString &fromNick, const QString &text, const QString &timestamp) {
+    static QJsonObject createMessageWithTimestamp(const QString &fromNick, const QString &text, const QString &timestamp, int fromId = 0) {
         QJsonObject obj;
         obj[Protocol::TYPE] = "message";
+        obj[Protocol::FROM_ID] = fromId;
         obj[Protocol::FROM_NICK] = fromNick;
         obj[Protocol::TEXT] = text;
         obj[Protocol::TIMESTAMP] = timestamp;

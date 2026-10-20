@@ -259,11 +259,13 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
             QString timestamp = ProtocolHelper::getString(message, Protocol::TIMESTAMP);
             qDebug() << "Message from" << fromNick << ":" << text;
             
-            int fromUserId = -1;
-            for (const auto &user : m_allUsers) {
-                if (user.nick == fromNick) {
-                    fromUserId = user.id;
-                    break;
+            int fromUserId = message[Protocol::FROM_ID].toInt(-1);
+            if (fromUserId <= 0) {
+                for (const auto &user : m_allUsers) {
+                    if (user.nick == fromNick) {
+                        fromUserId = user.id;
+                        break;
+                    }
                 }
             }
             
@@ -297,11 +299,13 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
                 QString text = msg["message"].toString();
                 QString timestamp = msg["timestamp"].toString();
                 
-                int fromUserId = -1;
-                for (const auto &user : m_allUsers) {
-                    if (user.nick == fromNick) {
-                        fromUserId = user.id;
-                        break;
+                int fromUserId = msg["from_id"].toInt(-1);
+                if (fromUserId <= 0) {
+                    for (const auto &user : m_allUsers) {
+                        if (user.nick == fromNick) {
+                            fromUserId = user.id;
+                            break;
+                        }
                     }
                 }
                 

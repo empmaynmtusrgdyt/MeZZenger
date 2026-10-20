@@ -192,7 +192,7 @@ void ClientHandler::handleMessage(const QJsonObject &message) {
     if (toNick.isEmpty() || text.isEmpty()) return;
 
     int toUserId = m_database->getUserIdByNick(toNick);
-    if (toUserId <= 0) return;
+    if (toUserId <= 0 || toUserId == m_userId) return;
 
     int messageId = m_database->saveMessage(m_userId, toUserId, text);
     forwardMessage(m_userId, toUserId, messageId, text);
@@ -220,7 +220,7 @@ void ClientHandler::deliverOfflineMessages() {
         QString fromNick = m_database->getNickById(fromUserId);
         if (fromNick.isEmpty()) continue;
 
-        QJsonObject response = ProtocolHelper::createMessageWithTimestamp(fromNick, messageText, timestamp);
+        QJsonObject response = ProtocolHelper::createMessageWithTimestamp(fromNick, messageText, timestamp, fromUserId);
         sendMessage(response);
     }
 
@@ -245,6 +245,7 @@ void ClientHandler::handleGetOfflineMessages() {
         messageIds.append(msg["id"].toInt());
 
         QJsonObject resolved;
+        resolved["from_id"] = fromUserId;
         resolved["from_nick"] = fromNick;
         resolved["message"] = msg["message"];
         resolved["timestamp"] = msg["timestamp"];
@@ -276,6 +277,12 @@ void ClientHandler::handleSearchUser(const QJsonObject &message) {
         return;
     }
 
+    if (user["id"].toInt() == m_userId) {
+        QJsonObject response = ProtocolHelper::createSearchUserResponse(false, QJsonObject(), "Нельзя написать самому себе");
+        sendMessage(response);
+        return;
+    }
+
     QJsonObject response = ProtocolHelper::createSearchUserResponse(true, user);
     sendMessage(response);
 }
@@ -291,7 +298,7 @@ void ClientHandler::handleMarkMessagesRead(const QJsonObject &message) {
 
 void ClientHandler::forwardMessage(int fromUserId, int toUserId, int messageId, const QString &text) {
     QJsonObject message = ProtocolHelper::createMessageWithTimestamp(
-        m_nick, text, QDateTime::currentDateTime().toString(Qt::ISODate)
+        m_nick, text, QDateTime::currentDateTime().toString(Qt::ISODate), fromUserId
     );
     emit messageReady(toUserId, messageId, message);
 }
