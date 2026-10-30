@@ -25,7 +25,9 @@ ClientHandler::~ClientHandler() {
 }
 
 void ClientHandler::sendMessage(const QJsonObject &message) {
-    if (!m_socket || !m_authenticated) {
+    // Без проверки m_authenticated: иначе клиент никогда не узнает об отказе во входе.
+    // Маршрутизация сообщений другим пользователям проверяет isAuthenticated() в ServerCore.
+    if (!m_socket) {
         return;
     }
 
@@ -163,13 +165,21 @@ void ClientHandler::handleRegister(const QJsonObject &message) {
         return;
     }
 
+    // Код проверяется первым, чтобы без него нельзя было выяснять, какие ники заняты
+    QString invite = ProtocolHelper::getString(message, Protocol::INVITE);
+    if (!m_database->inviteAvailable(invite)) {
+        qDebug() << "Register rejected, invalid invite for:" << nick;
+        sendAuthResponse(false, "Неверный или уже использованный код приглашения");
+        return;
+    }
+
     if (m_database->userExists(nick)) {
         qDebug() << "User already exists:" << nick;
         sendAuthResponse(false, "Пользователь уже существует");
         return;
     }
 
-    int userId = m_database->createUser(nick, password);
+    int userId = m_database->createUserWithInvite(nick, password, invite);
     if (userId <= 0) {
         qDebug() << "Failed to create user:" << nick;
         sendAuthResponse(false, "Ошибка регистрации");

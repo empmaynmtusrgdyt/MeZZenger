@@ -33,6 +33,7 @@ private:
     QLineEdit *m_portEdit;
     QLineEdit *m_nickEdit;
     QLineEdit *m_passwordEdit;
+    QLineEdit *m_inviteEdit;
     
     QPushButton *m_loginButton;
     QPushButton *m_registerButton;

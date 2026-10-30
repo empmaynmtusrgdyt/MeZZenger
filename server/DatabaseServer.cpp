@@ -1,6 +1,23 @@
 #include "DatabaseServer.h"
 #include <QDebug>
 #include <QFile>
+#include <QRandomGenerator>
+
+namespace {
+
+// Код сравнивается без регистра и разделителей: "abcd-efgh" == "ABCDEFGH"
+QString inviteHash(const QString &code) {
+    QString normalized;
+    for (QChar c : code) {
+        if (c.isLetterOrNumber()) {
+            normalized += c.toUpper();
+        }
+    }
+    return normalized.isEmpty() ? QString()
+        : QString::fromLatin1(QCryptographicHash::hash(normalized.toUtf8(), QCryptographicHash::Sha256).toHex());
+}
+
+}
 
 DatabaseServer::DatabaseServer(QObject *parent)
     : QObject(parent)
@@ -79,6 +96,17 @@ bool DatabaseServer::initialize(const QString &dbPath) {
         }
     }
 
+    if (!query.exec(
+        "CREATE TABLE IF NOT EXISTS invites ("
+        "code_hash TEXT PRIMARY KEY, "
+        "created_at DATETIME DEFAULT CURRENT_TIMESTAMP, "
+        "used_by INTEGER, "
+        "used_at DATETIME)"
+    )) {
+        qCritical() << "Ошибка создания таблицы invites:" << query.lastError().text();
+        return false;
+    }
+
     query.exec("PRAGMA table_info(messages)");
     bool hasClientMsgId = false;
     while (query.next()) {
@@ -143,6 +171,66 @@ int DatabaseServer::createUser(const QString &nick, const QString &password) {
     }
 
     return query.lastInsertId().toInt();
+}
+
+QString DatabaseServer::createInvite() {
+    // Без похожих символов (0/O, 1/I/L, U): код диктуют и переписывают вручную
+    static const char alphabet[] = "ABCDEFGHJKMNPQRSTVWXYZ23456789";
+    const int alphabetSize = sizeof(alphabet) - 1;
+
+    QString code;
+    for (int i = 0; i < 16; ++i) {
+        if (i > 0 && i % 4 == 0) {
+            code += '-';
+        }
+        code += QLatin1Char(alphabet[QRandomGenerator::system()->bounded(alphabetSize)]);
+    }
+
+    QSqlQuery query = createQuery();
+    query.prepare("INSERT INTO invites (code_hash) VALUES (:hash)");
+    query.bindValue(":hash", inviteHash(code));
+    if (!query.exec()) {
+        qWarning() << "Ошибка создания приглашения:" << query.lastError().text();
+        return QString();
+    }
+    return code;
+}
+
+bool DatabaseServer::inviteAvailable(const QString &code) {
+    const QString hash = inviteHash(code);
+    if (hash.isEmpty()) {
+        return false;
+    }
+
+    QSqlQuery query = createQuery();
+    query.prepare("SELECT 1 FROM invites WHERE code_hash = :hash AND used_by IS NULL");
+    query.bindValue(":hash", hash);
+    return query.exec() && query.next();
+}
+
+int DatabaseServer::createUserWithInvite(const QString &nick, const QString &password, const QString &code) {
+    if (!m_db.transaction()) {
+        return -1;
+    }
+
+    int userId = createUser(nick, password);
+    bool ok = userId > 0;
+    if (ok) {
+        QSqlQuery query = createQuery();
+        query.prepare(
+            "UPDATE invites SET used_by = :uid, used_at = CURRENT_TIMESTAMP "
+            "WHERE code_hash = :hash AND used_by IS NULL"
+        );
+        query.bindValue(":uid", userId);
+        query.bindValue(":hash", inviteHash(code));
+        ok = query.exec() && query.numRowsAffected() == 1;
+    }
+
+    if (ok && m_db.commit()) {
+        return userId;
+    }
+    m_db.rollback();
+    return -1;
 }
 
 bool DatabaseServer::userExists(const QString &nick) {

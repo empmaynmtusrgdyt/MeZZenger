@@ -19,6 +19,11 @@ public:
     bool initialize(const QString &dbPath = "server.db");
 
     int createUser(const QString &nick, const QString &password);
+
+    // Регистрация только по одноразовому коду приглашения. В базе хранится лишь хеш кода.
+    QString createInvite();
+    bool inviteAvailable(const QString &code);
+    int createUserWithInvite(const QString &nick, const QString &password, const QString &code);
     bool userExists(const QString &nick);
     int getUserIdByNick(const QString &nick);
     QString getNickById(int userId);

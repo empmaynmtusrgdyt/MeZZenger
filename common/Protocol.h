@@ -40,6 +40,7 @@ namespace Protocol {
     inline const QString ID = "id";
     inline const QString IDS = "ids";
     inline const QString CLIENT_MSG_ID = "client_msg_id";
+    inline const QString INVITE = "invite";
 }
 
 class ProtocolHelper {
@@ -52,11 +53,12 @@ public:
         return obj;
     }
 
-    static QJsonObject createRegisterMessage(const QString &nick, const QString &password) {
+    static QJsonObject createRegisterMessage(const QString &nick, const QString &password, const QString &invite = QString()) {
         QJsonObject obj;
         obj[Protocol::TYPE] = "register";
         obj[Protocol::NICK] = nick;
         obj[Protocol::PASSWORD] = password;
+        obj[Protocol::INVITE] = invite;
         return obj;
     }
 

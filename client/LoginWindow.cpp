@@ -13,7 +13,7 @@ LoginWindow::LoginWindow(QWidget *parent)
     : QMainWindow(parent)
 {
     setWindowTitle("MeZZenger - Вход");
-    resize(400, 300);
+    resize(400, 360);
     setupUI();
     applyStyles();
 }
@@ -56,6 +56,10 @@ void LoginWindow::setupUI() {
     m_passwordEdit->setPlaceholderText("Пароль");
     m_passwordEdit->setEchoMode(QLineEdit::Password);
     formLayout->addRow("Пароль:", m_passwordEdit);
+
+    m_inviteEdit = new QLineEdit();
+    m_inviteEdit->setPlaceholderText("только для регистрации");
+    formLayout->addRow("Код приглашения:", m_inviteEdit);
 
     mainLayout->addLayout(formLayout);
     mainLayout->addSpacing(20);
@@ -124,6 +128,10 @@ void LoginWindow::onRegisterClicked() {
         QMessageBox::warning(this, "Ошибка", "Пароль должен быть не менее 4 символов");
         return;
     }
+    if (m_inviteEdit->text().trimmed().isEmpty()) {
+        QMessageBox::warning(this, "Ошибка", "Для регистрации нужен код приглашения. Его выдаёт администратор сервера.");
+        return;
+    }
     m_currentHost = getHost();
     m_currentPort = static_cast<quint16>(getPort());
     sendAuthRequest("register");
@@ -145,6 +153,9 @@ void LoginWindow::sendAuthRequest(const QString &type) {
     msg["type"] = type;
     msg["nick"] = getNick();
     msg["password"] = getPassword();
+    if (type == "register") {
+        msg[Protocol::INVITE] = m_inviteEdit->text().trimmed();
+    }
     QByteArray data = serializeMessage(msg);
 
     // Пока пользователь читает отпечаток сертификата, таймаут не должен сработать
