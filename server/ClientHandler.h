@@ -49,6 +49,7 @@ private:
     void handleDeliveryAck(const QJsonObject &message);
 
     void sendAuthResponse(bool success, const QString &message);
+    bool checkProtocolVersion(const QJsonObject &message);
     void sendUserList();
     void handleGetOfflineMessages();
     void forwardMessage(int fromUserId, int toUserId, int messageId, const QString &text);

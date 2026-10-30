@@ -41,6 +41,12 @@ namespace Protocol {
     inline const QString IDS = "ids";
     inline const QString CLIENT_MSG_ID = "client_msg_id";
     inline const QString INVITE = "invite";
+    inline const QString PROTOCOL = "protocol";
+
+    // Версия протокола. Увеличивайте при любом несовместимом изменении (смена смысла полей,
+    // новые обязательные поля или сообщения). Добавление необязательных полей версию не меняет.
+    // Сервер принимает только клиентов с точно такой же версией.
+    inline constexpr int Version = 1;
 }
 
 class ProtocolHelper {
@@ -48,6 +54,7 @@ public:
     static QJsonObject createLoginMessage(const QString &nick, const QString &password) {
         QJsonObject obj;
         obj[Protocol::TYPE] = "login";
+        obj[Protocol::PROTOCOL] = Protocol::Version;
         obj[Protocol::NICK] = nick;
         obj[Protocol::PASSWORD] = password;
         return obj;
@@ -56,6 +63,7 @@ public:
     static QJsonObject createRegisterMessage(const QString &nick, const QString &password, const QString &invite = QString()) {
         QJsonObject obj;
         obj[Protocol::TYPE] = "register";
+        obj[Protocol::PROTOCOL] = Protocol::Version;
         obj[Protocol::NICK] = nick;
         obj[Protocol::PASSWORD] = password;
         obj[Protocol::INVITE] = invite;
@@ -65,6 +73,7 @@ public:
     static QJsonObject createAuthResponse(bool success, const QString &message) {
         QJsonObject obj;
         obj[Protocol::TYPE] = "auth_response";
+        obj[Protocol::PROTOCOL] = Protocol::Version;
         obj[Protocol::SUCCESS] = success;
         obj[Protocol::MESSAGE] = message;
         return obj;

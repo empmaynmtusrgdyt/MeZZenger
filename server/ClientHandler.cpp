@@ -117,6 +117,7 @@ void ClientHandler::processMessage(const QJsonObject &message) {
 void ClientHandler::handleLogin(const QJsonObject &message) {
     qDebug() << "handleLogin called";
     if (m_authenticated) return;
+    if (!checkProtocolVersion(message)) return;
 
     QString nick = ProtocolHelper::getString(message, Protocol::NICK);
     QString password = ProtocolHelper::getString(message, Protocol::PASSWORD);
@@ -155,6 +156,7 @@ void ClientHandler::handleLogin(const QJsonObject &message) {
 void ClientHandler::handleRegister(const QJsonObject &message) {
     qDebug() << "handleRegister called";
     if (m_authenticated) return;
+    if (!checkProtocolVersion(message)) return;
 
     QString nick = ProtocolHelper::getString(message, Protocol::NICK);
     QString password = ProtocolHelper::getString(message, Protocol::PASSWORD);
@@ -241,6 +243,27 @@ void ClientHandler::handleDeliveryAck(const QJsonObject &message) {
 
     qDebug() << "Подтверждение доставки от" << m_nick << ":" << ids;
     m_database->markMessagesAsDelivered(m_userId, ids);
+}
+
+bool ClientHandler::checkProtocolVersion(const QJsonObject &message) {
+    const int clientVersion = message[Protocol::PROTOCOL].toInt(0);
+    if (clientVersion == Protocol::Version) {
+        return true;
+    }
+
+    qDebug() << "Несовместимая версия протокола у клиента:" << clientVersion
+             << "(сервер:" << Protocol::Version << ")";
+    if (clientVersion > Protocol::Version) {
+        sendAuthResponse(false, QString("Сервер устарел: приложение использует протокол версии %1, "
+                                        "а сервер - %2. Обновите сервер.")
+                                    .arg(clientVersion).arg(Protocol::Version));
+    } else {
+        sendAuthResponse(false, QString("Приложение устарело: сервер использует протокол версии %1, "
+                                        "а у вас %2. Обновите приложение.")
+                                    .arg(Protocol::Version)
+                                    .arg(clientVersion > 0 ? QString::number(clientVersion) : QString("старая")));
+    }
+    return false;
 }
 
 void ClientHandler::sendAuthResponse(bool success, const QString &message) {

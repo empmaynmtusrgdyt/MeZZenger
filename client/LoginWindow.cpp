@@ -151,6 +151,7 @@ void LoginWindow::sendAuthRequest(const QString &type) {
 
     QJsonObject msg;
     msg["type"] = type;
+    msg[Protocol::PROTOCOL] = Protocol::Version;
     msg["nick"] = getNick();
     msg["password"] = getPassword();
     if (type == "register") {

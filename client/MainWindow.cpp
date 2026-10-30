@@ -188,6 +188,7 @@ void MainWindow::sendAuthRequest(const QString &type) {
     qDebug() << "Sending auth request:" << type << "nick:" << m_nick;
     QJsonObject message;
     message["type"] = type;
+    message[Protocol::PROTOCOL] = Protocol::Version;
     message["nick"] = m_nick;
     message["password"] = m_password;
     

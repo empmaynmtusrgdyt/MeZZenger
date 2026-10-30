@@ -69,7 +69,7 @@ bool ServerCore::start(quint16 port, const QString &certPath, const QString &key
         return false;
     }
 
-    qDebug() << "Сервер запущен на порту" << port << "(TLS)";
+    qDebug() << "Сервер запущен на порту" << port << "(TLS), версия протокола" << Protocol::Version;
     qDebug().noquote() << "Отпечаток сертификата SHA-256:"
                        << QCryptographicHash::hash(certificate.toDer(), QCryptographicHash::Sha256).toHex(':').toUpper();
     qDebug() << "База данных: server.db";
