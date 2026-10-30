@@ -119,10 +119,8 @@ void ServerCore::sendMessageToUser(int userId, int messageId, const QJsonObject 
         ClientHandler *handler = m_clients[userId];
         if (handler->isAuthenticated()) {
             handler->sendMessage(message);
-            if (messageId > 0) {
-                m_database.markMessagesAsDelivered(userId, {messageId});
-            }
-            qDebug() << "Сообщение доставлено пользователю" << userId;
+            // Доставленным сообщение станет после delivery_ack от получателя
+            qDebug() << "Сообщение" << messageId << "отправлено пользователю" << userId << "- ждём подтверждения";
             return;
         }
     }

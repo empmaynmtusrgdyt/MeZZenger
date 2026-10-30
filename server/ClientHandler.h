@@ -46,10 +46,10 @@ private:
     void handleMessage(const QJsonObject &message);
     void handleSearchUser(const QJsonObject &message);
     void handleMarkMessagesRead(const QJsonObject &message);
+    void handleDeliveryAck(const QJsonObject &message);
 
     void sendAuthResponse(bool success, const QString &message);
     void sendUserList();
-    void deliverOfflineMessages();
     void handleGetOfflineMessages();
     void forwardMessage(int fromUserId, int toUserId, int messageId, const QString &text);
 };

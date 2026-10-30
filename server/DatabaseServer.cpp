@@ -79,6 +79,30 @@ bool DatabaseServer::initialize(const QString &dbPath) {
         }
     }
 
+    query.exec("PRAGMA table_info(messages)");
+    bool hasClientMsgId = false;
+    while (query.next()) {
+        if (query.value(1).toString() == "client_msg_id") {
+            hasClientMsgId = true;
+            break;
+        }
+    }
+    if (!hasClientMsgId) {
+        qDebug() << "Добавляем колонку client_msg_id в таблицу messages";
+        if (!query.exec("ALTER TABLE messages ADD COLUMN client_msg_id TEXT")) {
+            qCritical() << "Не удалось добавить колонку client_msg_id:" << query.lastError().text();
+            return false;
+        }
+    }
+
+    if (!query.exec(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_msg "
+        "ON messages(from_user_id, client_msg_id) WHERE client_msg_id IS NOT NULL"
+    )) {
+        qCritical() << "Не удалось создать индекс client_msg_id:" << query.lastError().text();
+        return false;
+    }
+
     if (!query.exec(
         "CREATE INDEX IF NOT EXISTS idx_messages_to_user ON messages(to_user_id)"
     )) {
@@ -250,19 +274,36 @@ QJsonObject DatabaseServer::searchUser(const QString &nick) {
     return result;
 }
 
-int DatabaseServer::saveMessage(int fromUserId, int toUserId, const QString &message) {
+int DatabaseServer::saveMessage(int fromUserId, int toUserId, const QString &message,
+                                const QString &clientMsgId, bool *duplicate) {
+    if (duplicate) {
+        *duplicate = false;
+    }
     if (fromUserId <= 0 || toUserId <= 0) {
         return -1;
     }
 
     QSqlQuery query = createQuery();
+    if (!clientMsgId.isEmpty()) {
+        query.prepare("SELECT id FROM messages WHERE from_user_id = :from AND client_msg_id = :cid");
+        query.bindValue(":from", fromUserId);
+        query.bindValue(":cid", clientMsgId);
+        if (query.exec() && query.next()) {
+            if (duplicate) {
+                *duplicate = true;
+            }
+            return query.value(0).toInt();
+        }
+    }
+
     query.prepare(
-        "INSERT INTO messages (from_user_id, to_user_id, message, delivered) "
-        "VALUES (:from, :to, :msg, 0)"
+        "INSERT INTO messages (from_user_id, to_user_id, message, delivered, client_msg_id) "
+        "VALUES (:from, :to, :msg, 0, :cid)"
     );
     query.bindValue(":from", fromUserId);
     query.bindValue(":to", toUserId);
     query.bindValue(":msg", message);
+    query.bindValue(":cid", clientMsgId.isEmpty() ? QVariant(QMetaType(QMetaType::QString)) : QVariant(clientMsgId));
 
     if (!query.exec()) {
         qWarning() << "Ошибка сохранения сообщения:" << query.lastError().text();
@@ -283,7 +324,7 @@ QList<QJsonObject> DatabaseServer::getUndeliveredMessages(int toUserId) {
     query.prepare(
         "SELECT id, from_user_id, message, timestamp FROM messages "
         "WHERE to_user_id = :to AND delivered = 0 "
-        "ORDER BY timestamp ASC "
+        "ORDER BY id ASC "
         "LIMIT 100"
     );
     query.bindValue(":to", toUserId);

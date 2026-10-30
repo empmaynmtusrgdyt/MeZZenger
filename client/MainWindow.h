@@ -50,6 +50,7 @@ private:
     
     QSslSocket *m_socket;
     bool m_tlsRejected = false;
+    bool m_authenticated = false;
     QTimer *m_reconnectTimer;
     QByteArray m_buffer;
     
@@ -72,12 +73,15 @@ private:
     void connectToServer();
     void sendAuthRequest(const QString &type);
     void requestOfflineMessages();
+    void sendPendingMessage(const PendingMessage &pending);
+    void resendPendingMessages();
+    void sendDeliveryAck(const QList<int> &ids);
     void processServerMessage(const QJsonObject &message);
     void updateUserList(const QList<QJsonObject> &users);
     void refreshSidebar();
     void addUserToSidebar(int userId, const QString &nick);
     void loadMessageHistory(int userId);
-    void appendMessage(const QString &fromNick, const QString &text, const QString &timestamp, bool isOutgoing, bool isRead);
+    void appendMessage(const QString &fromNick, const QString &text, const QString &timestamp, bool isOutgoing, bool isRead, bool pending = false);
     void markContactAsUnread(int userId);
     void clearContactUnread(int userId);
     void markMessagesReadOnServer(int userId);

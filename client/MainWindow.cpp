@@ -2,6 +2,7 @@
 #include "Protocol.h"
 #include "TlsTrust.h"
 #include <QMessageBox>
+#include <QUuid>
 #include <QJsonDocument>
 #include <QDateTime>
 #include <QScrollBar>
@@ -241,6 +242,7 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
             qDebug() << "Auth response success:" << success << "msg:" << msg;
             
             if (success) {
+                m_authenticated = true;
             } else {
                 QMessageBox::warning(this, "Ошибка", msg);
                 close();
@@ -280,14 +282,24 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
                     addUserToSidebar(fromUserId, fromNick);
                 }
                 
-                m_database->saveMessage(fromUserId, m_nick, text, false, fromNick);
+                int serverId = message[Protocol::ID].toInt(0);
+                auto saved = m_database->saveIncoming(fromUserId, m_nick, fromNick, text, serverId);
+                if (saved == DatabaseClient::SaveResult::Error) {
+                    // Без подтверждения сервер доставит сообщение ещё раз
+                    break;
+                }
+                if (serverId > 0) {
+                    sendDeliveryAck({serverId});
+                }
                 
-                if (fromUserId == m_selectedUserId) {
-                    appendMessage(fromNick, text, timestamp, false, false);
-                    clearContactUnread(fromUserId);
-                } else {
-                    markContactAsUnread(fromUserId);
-                    qDebug() << "Непрочитанное сообщение от" << fromNick;
+                if (saved == DatabaseClient::SaveResult::Saved) {
+                    if (fromUserId == m_selectedUserId) {
+                        appendMessage(fromNick, text, timestamp, false, false);
+                        clearContactUnread(fromUserId);
+                    } else {
+                        markContactAsUnread(fromUserId);
+                        qDebug() << "Непрочитанное сообщение от" << fromNick;
+                    }
                 }
             } else {
                 qDebug() << "Не найден ID для ника:" << fromNick;
@@ -299,6 +311,7 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
             QJsonArray messagesArray = message["messages"].toArray();
             qDebug() << "Received offline messages, count:" << messagesArray.size();
             bool affectsSelectedContact = false;
+            QList<int> ackIds;
             for (const QJsonValue &val : messagesArray) {
                 QJsonObject msg = val.toObject();
                 QString fromNick = msg["from_nick"].toString();
@@ -320,7 +333,17 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
                         addUserToSidebar(fromUserId, fromNick);
                     }
                     
-                    m_database->saveMessage(fromUserId, m_nick, text, false, fromNick);
+                    int serverId = msg["id"].toInt(0);
+                    auto saved = m_database->saveIncoming(fromUserId, m_nick, fromNick, text, serverId);
+                    if (saved == DatabaseClient::SaveResult::Error) {
+                        continue;
+                    }
+                    if (serverId > 0) {
+                        ackIds.append(serverId);
+                    }
+                    if (saved == DatabaseClient::SaveResult::Duplicate) {
+                        continue;
+                    }
                     
                     if (fromUserId == m_selectedUserId) {
                         affectsSelectedContact = true;
@@ -330,6 +353,24 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
                 }
             }
             if (affectsSelectedContact) {
+                loadMessageHistory(m_selectedUserId);
+            }
+            if (!ackIds.isEmpty()) {
+                sendDeliveryAck(ackIds);
+                // Сервер отдаёт офлайн-сообщения порциями, запрашиваем следующую
+                if (messagesArray.size() >= 100) {
+                    requestOfflineMessages();
+                }
+            }
+            break;
+        }
+
+        case Protocol::MessageType::MessageAck: {
+            QString clientMsgId = ProtocolHelper::getString(message, Protocol::CLIENT_MSG_ID);
+            int serverId = message[Protocol::ID].toInt(0);
+            if (!clientMsgId.isEmpty() && serverId > 0
+                && m_database->markOutgoingSent(m_nick, clientMsgId, serverId)
+                && m_selectedUserId > 0) {
                 loadMessageHistory(m_selectedUserId);
             }
             break;
@@ -398,8 +439,44 @@ void MainWindow::updateUserList(const QList<QJsonObject> &users) {
         m_allUsers[id] = info;
     }
     
+    // Получатель неподтверждённого сообщения может быть неизвестен серверу (переписки ещё нет)
+    for (const auto &pending : m_database->getPendingOutgoing(m_nick)) {
+        if (!m_allUsers.contains(pending.userId) && !pending.peerNick.isEmpty()) {
+            UserInfo info;
+            info.id = pending.userId;
+            info.nick = pending.peerNick;
+            m_allUsers[pending.userId] = info;
+        }
+    }
+    
     refreshSidebar();
+    resendPendingMessages();
     requestOfflineMessages();
+}
+
+void MainWindow::sendPendingMessage(const PendingMessage &pending) {
+    if (!m_authenticated || pending.peerNick.isEmpty()) {
+        return;
+    }
+    QJsonObject message = ProtocolHelper::createOutgoingMessage(pending.peerNick, pending.message, pending.clientMsgId);
+    m_socket->write(serializeMessage(message));
+}
+
+void MainWindow::resendPendingMessages() {
+    const QList<PendingMessage> pending = m_database->getPendingOutgoing(m_nick);
+    if (!pending.isEmpty()) {
+        qDebug() << "Повторная отправка неподтверждённых сообщений:" << pending.size();
+    }
+    for (const auto &message : pending) {
+        sendPendingMessage(message);
+    }
+}
+
+void MainWindow::sendDeliveryAck(const QList<int> &ids) {
+    if (!m_authenticated || ids.isEmpty()) {
+        return;
+    }
+    m_socket->write(serializeMessage(ProtocolHelper::createDeliveryAck(ids)));
 }
 
 void MainWindow::refreshSidebar() {
@@ -464,15 +541,18 @@ void MainWindow::loadMessageHistory(int userId) {
     qDebug() << "Загрузка истории для userId" << userId << ", найдено записей:" << history.size();
     
     for (const auto &entry : history) {
-        appendMessage(entry.fromNick, entry.message, entry.timestamp, entry.isOutgoing, entry.isRead);
+        appendMessage(entry.fromNick, entry.message, entry.timestamp, entry.isOutgoing, entry.isRead, entry.pending);
     }
     
     m_messagesArea->verticalScrollBar()->setValue(m_messagesArea->verticalScrollBar()->maximum());
 }
 
 void MainWindow::appendMessage(const QString &fromNick, const QString &text, 
-                                const QString &timestamp, bool isOutgoing, bool isRead) {
+                                const QString &timestamp, bool isOutgoing, bool isRead, bool pending) {
     QString prefix = isOutgoing ? "Вы" : fromNick;
+    if (pending) {
+        prefix += " ⏳";
+    }
     
     QString html = m_messagesArea->toHtml();
     
@@ -546,17 +626,16 @@ void MainWindow::onSendMessageClicked() {
         return;
     }
     
-    QJsonObject message;
-    message["type"] = "message";
-    message["to_nick"] = m_selectedUserNick;
-    message["text"] = text;
+    // Сообщение сохраняется как неподтверждённое и уходит серверу сразу, если есть связь,
+    // иначе будет отправлено после переподключения
+    QString clientMsgId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    if (!m_database->saveOutgoing(m_selectedUserId, m_nick, m_selectedUserNick, text, clientMsgId)) {
+        QMessageBox::warning(this, "Ошибка", "Не удалось сохранить сообщение в локальную базу");
+        return;
+    }
+    sendPendingMessage({m_selectedUserId, m_selectedUserNick, text, clientMsgId});
     
-    QByteArray data = serializeMessage(message);
-    m_socket->write(data);
-    
-    m_database->saveMessage(m_selectedUserId, m_nick, text, true, m_nick);
-    
-    appendMessage(m_nick, text, QDateTime::currentDateTime().toString(Qt::ISODate), true, false);
+    appendMessage(m_nick, text, QDateTime::currentDateTime().toString(Qt::ISODate), true, false, true);
     
     m_messageEdit->clear();
 }
@@ -569,6 +648,7 @@ void MainWindow::markMessagesReadOnServer(int userId) {
 
 void MainWindow::onSocketDisconnected() {
     qDebug() << "Disconnected from server";
+    m_authenticated = false;
     if (m_tlsRejected) {
         return;
     }
@@ -577,6 +657,10 @@ void MainWindow::onSocketDisconnected() {
 
 void MainWindow::onSocketError() {
     qDebug() << "Socket error:" << m_socket->errorString();
+    // Неудачная попытка подключения не даёт сигнала disconnected, повторяем сами
+    if (!m_tlsRejected && m_socket->state() == QAbstractSocket::UnconnectedState) {
+        m_reconnectTimer->start(3000);
+    }
 }
 
 void MainWindow::reconnectTimerTimeout() {

@@ -96,6 +96,11 @@ void ClientHandler::processMessage(const QJsonObject &message) {
                 handleSearchUser(message);
             }
             break;
+        case Protocol::MessageType::DeliveryAck:
+            if (m_authenticated) {
+                handleDeliveryAck(message);
+            }
+            break;
         case Protocol::MessageType::MarkMessagesRead:
             if (m_authenticated) {
                 handleMarkMessagesRead(message);
@@ -194,8 +199,38 @@ void ClientHandler::handleMessage(const QJsonObject &message) {
     int toUserId = m_database->getUserIdByNick(toNick);
     if (toUserId <= 0 || toUserId == m_userId) return;
 
-    int messageId = m_database->saveMessage(m_userId, toUserId, text);
+    QString clientMsgId = ProtocolHelper::getString(message, Protocol::CLIENT_MSG_ID);
+
+    bool duplicate = false;
+    int messageId = m_database->saveMessage(m_userId, toUserId, text, clientMsgId, &duplicate);
+    if (messageId <= 0) {
+        // Без подтверждения клиент оставит сообщение в очереди и повторит отправку
+        return;
+    }
+
+    if (!clientMsgId.isEmpty()) {
+        sendMessage(ProtocolHelper::createMessageAck(clientMsgId, messageId));
+    }
+
+    if (duplicate) {
+        qDebug() << "Повторная отправка сообщения" << clientMsgId << "- уже сохранено как" << messageId;
+        return;
+    }
     forwardMessage(m_userId, toUserId, messageId, text);
+}
+
+void ClientHandler::handleDeliveryAck(const QJsonObject &message) {
+    QList<int> ids;
+    for (const QJsonValue &val : message[Protocol::IDS].toArray()) {
+        int id = val.toInt();
+        if (id > 0) {
+            ids.append(id);
+        }
+    }
+    if (ids.isEmpty()) return;
+
+    qDebug() << "Подтверждение доставки от" << m_nick << ":" << ids;
+    m_database->markMessagesAsDelivered(m_userId, ids);
 }
 
 void ClientHandler::sendAuthResponse(bool success, const QString &message) {
@@ -210,41 +245,19 @@ void ClientHandler::sendUserList() {
     sendMessage(response);
 }
 
-void ClientHandler::deliverOfflineMessages() {
-    QList<QJsonObject> messages = m_database->getUndeliveredMessages(m_userId);
-    for (const auto &msg : messages) {
-        int fromUserId = msg["from_user_id"].toInt();
-        QString messageText = msg["message"].toString();
-        QString timestamp = msg["timestamp"].toString();
-
-        QString fromNick = m_database->getNickById(fromUserId);
-        if (fromNick.isEmpty()) continue;
-
-        QJsonObject response = ProtocolHelper::createMessageWithTimestamp(fromNick, messageText, timestamp, fromUserId);
-        sendMessage(response);
-    }
-
-    QList<int> messageIds;
-    for (const auto &msg : messages) messageIds.append(msg["id"].toInt());
-    if (!messageIds.isEmpty()) {
-        m_database->markMessagesAsDelivered(m_userId, messageIds);
-    }
-}
-
 void ClientHandler::handleGetOfflineMessages() {
     QList<QJsonObject> rawMessages = m_database->getUndeliveredMessages(m_userId);
     qDebug() << "Отправка offline-сообщений для" << m_nick << ", количество:" << rawMessages.size();
 
-    QList<int> messageIds;
+    // Доставленными сообщения считаются только после delivery_ack от клиента
     QList<QJsonObject> messages;
     for (const auto &msg : rawMessages) {
         int fromUserId = msg["from_user_id"].toInt();
         QString fromNick = m_database->getNickById(fromUserId);
         if (fromNick.isEmpty()) continue;
 
-        messageIds.append(msg["id"].toInt());
-
         QJsonObject resolved;
+        resolved["id"] = msg["id"];
         resolved["from_id"] = fromUserId;
         resolved["from_nick"] = fromNick;
         resolved["message"] = msg["message"];
@@ -254,10 +267,6 @@ void ClientHandler::handleGetOfflineMessages() {
 
     QJsonObject response = ProtocolHelper::createMessageHistory(messages);
     sendMessage(response);
-
-    if (!messageIds.isEmpty()) {
-        m_database->markMessagesAsDelivered(m_userId, messageIds);
-    }
 }
 
 void ClientHandler::handleSearchUser(const QJsonObject &message) {
@@ -298,7 +307,7 @@ void ClientHandler::handleMarkMessagesRead(const QJsonObject &message) {
 
 void ClientHandler::forwardMessage(int fromUserId, int toUserId, int messageId, const QString &text) {
     QJsonObject message = ProtocolHelper::createMessageWithTimestamp(
-        m_nick, text, QDateTime::currentDateTime().toString(Qt::ISODate), fromUserId
+        m_nick, text, QDateTime::currentDateTime().toString(Qt::ISODate), fromUserId, messageId
     );
     emit messageReady(toUserId, messageId, message);
 }

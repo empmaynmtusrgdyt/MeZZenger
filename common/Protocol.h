@@ -21,7 +21,9 @@ namespace Protocol {
         Error,
         SearchUser,
         SearchUserResponse,
-        MarkMessagesRead
+        MarkMessagesRead,
+        MessageAck,
+        DeliveryAck
     };
 
     inline const QString TYPE = "type";
@@ -36,6 +38,8 @@ namespace Protocol {
     inline const QString TEXT = "text";
     inline const QString TIMESTAMP = "timestamp";
     inline const QString ID = "id";
+    inline const QString IDS = "ids";
+    inline const QString CLIENT_MSG_ID = "client_msg_id";
 }
 
 class ProtocolHelper {
@@ -84,9 +88,43 @@ public:
         return obj;
     }
 
-    static QJsonObject createMessageWithTimestamp(const QString &fromNick, const QString &text, const QString &timestamp, int fromId = 0) {
+    // Сообщение от клиента серверу. client_msg_id нужен серверу, чтобы отбросить повторную отправку.
+    static QJsonObject createOutgoingMessage(const QString &toNick, const QString &text, const QString &clientMsgId) {
         QJsonObject obj;
         obj[Protocol::TYPE] = "message";
+        obj[Protocol::TO_NICK] = toNick;
+        obj[Protocol::TEXT] = text;
+        obj[Protocol::CLIENT_MSG_ID] = clientMsgId;
+        return obj;
+    }
+
+    // Сервер -> отправителю: сообщение принято и сохранено под серверным id.
+    static QJsonObject createMessageAck(const QString &clientMsgId, int id) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "message_ack";
+        obj[Protocol::CLIENT_MSG_ID] = clientMsgId;
+        obj[Protocol::ID] = id;
+        return obj;
+    }
+
+    // Получатель -> серверу: сообщения с этими id получены и сохранены.
+    static QJsonObject createDeliveryAck(const QList<int> &ids) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "delivery_ack";
+        QJsonArray arr;
+        for (int id : ids) {
+            arr.append(id);
+        }
+        obj[Protocol::IDS] = arr;
+        return obj;
+    }
+
+    static QJsonObject createMessageWithTimestamp(const QString &fromNick, const QString &text, const QString &timestamp, int fromId = 0, int id = 0) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "message";
+        if (id > 0) {
+            obj[Protocol::ID] = id;
+        }
         obj[Protocol::FROM_ID] = fromId;
         obj[Protocol::FROM_NICK] = fromNick;
         obj[Protocol::TEXT] = text;
@@ -158,6 +196,8 @@ public:
         if (type == "search_user") return Protocol::MessageType::SearchUser;
         if (type == "search_user_response") return Protocol::MessageType::SearchUserResponse;
         if (type == "mark_messages_read") return Protocol::MessageType::MarkMessagesRead;
+        if (type == "message_ack") return Protocol::MessageType::MessageAck;
+        if (type == "delivery_ack") return Protocol::MessageType::DeliveryAck;
         return Protocol::MessageType::Error;
     }
 

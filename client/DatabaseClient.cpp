@@ -70,6 +70,37 @@ bool DatabaseClient::initialize(const QString &dbPath) {
         }
     }
 
+    const auto ensureColumn = [&](const QString &name, const QString &ddl) {
+        query.exec("PRAGMA table_info(messages)");
+        while (query.next()) {
+            if (query.value(1).toString() == name) {
+                return true;
+            }
+        }
+        qDebug() << "Добавляем колонку" << name << "в таблицу messages";
+        if (!query.exec("ALTER TABLE messages ADD COLUMN " + ddl)) {
+            qCritical() << "Не удалось добавить колонку" << name << ":" << query.lastError().text();
+            return false;
+        }
+        return true;
+    };
+
+    // status: 0 - ждёт подтверждения сервера, 1 - принято сервером / получено
+    if (!ensureColumn("server_id", "server_id INTEGER")
+        || !ensureColumn("client_msg_id", "client_msg_id TEXT")
+        || !ensureColumn("peer_nick", "peer_nick TEXT")
+        || !ensureColumn("status", "status INTEGER NOT NULL DEFAULT 1")) {
+        return false;
+    }
+
+    if (!query.exec(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_server_id "
+        "ON messages(my_nick, server_id) WHERE server_id IS NOT NULL"
+    )) {
+        qCritical() << "Не удалось создать индекс server_id:" << query.lastError().text();
+        return false;
+    }
+
     m_initialized = true;
     qDebug() << "Единая база данных клиента инициализирована:" << dbPath;
     return true;
@@ -118,6 +149,113 @@ bool DatabaseClient::saveMessage(int userId, const QString &yourNick,
     return true;
 }
 
+bool DatabaseClient::saveOutgoing(int userId, const QString &myNick, const QString &peerNick,
+                                  const QString &message, const QString &clientMsgId) {
+    if (!m_initialized) {
+        return false;
+    }
+
+    QSqlQuery query = createQuery();
+    query.prepare(
+        "INSERT INTO messages (user_id, user_nick, my_nick, message, is_outgoing, "
+        "client_msg_id, peer_nick, status) "
+        "VALUES (:user_id, :user_nick, :my_nick, :message, 1, :cid, :peer, 0)"
+    );
+    query.bindValue(":user_id", userId);
+    query.bindValue(":user_nick", myNick);
+    query.bindValue(":my_nick", myNick);
+    query.bindValue(":message", message);
+    query.bindValue(":cid", clientMsgId);
+    query.bindValue(":peer", peerNick);
+
+    if (!query.exec()) {
+        qWarning() << "Ошибка сохранения исходящего сообщения:" << query.lastError().text();
+        return false;
+    }
+    return true;
+}
+
+bool DatabaseClient::markOutgoingSent(const QString &myNick, const QString &clientMsgId, int serverId) {
+    if (!m_initialized) {
+        return false;
+    }
+
+    QSqlQuery query = createQuery();
+    query.prepare(
+        "UPDATE messages SET status = 1, server_id = :sid "
+        "WHERE my_nick = :my_nick AND client_msg_id = :cid AND is_outgoing = 1"
+    );
+    query.bindValue(":sid", serverId);
+    query.bindValue(":my_nick", myNick);
+    query.bindValue(":cid", clientMsgId);
+
+    if (!query.exec()) {
+        qWarning() << "Ошибка подтверждения исходящего сообщения:" << query.lastError().text();
+        return false;
+    }
+    return true;
+}
+
+QList<PendingMessage> DatabaseClient::getPendingOutgoing(const QString &myNick) {
+    QList<PendingMessage> pending;
+    if (!m_initialized) {
+        return pending;
+    }
+
+    QSqlQuery query = createQuery();
+    query.prepare(
+        "SELECT user_id, peer_nick, message, client_msg_id FROM messages "
+        "WHERE my_nick = :my_nick AND is_outgoing = 1 AND status = 0 AND client_msg_id IS NOT NULL "
+        "ORDER BY id ASC"
+    );
+    query.bindValue(":my_nick", myNick);
+
+    if (!query.exec()) {
+        qWarning() << "Ошибка получения неподтверждённых сообщений:" << query.lastError().text();
+        return pending;
+    }
+
+    while (query.next()) {
+        pending.append({query.value(0).toInt(), query.value(1).toString(),
+                        query.value(2).toString(), query.value(3).toString()});
+    }
+    return pending;
+}
+
+DatabaseClient::SaveResult DatabaseClient::saveIncoming(int userId, const QString &myNick,
+                                                        const QString &fromNick,
+                                                        const QString &message, int serverId) {
+    if (!m_initialized) {
+        return SaveResult::Error;
+    }
+
+    QSqlQuery query = createQuery();
+    if (serverId > 0) {
+        query.prepare("SELECT 1 FROM messages WHERE my_nick = :my_nick AND server_id = :sid");
+        query.bindValue(":my_nick", myNick);
+        query.bindValue(":sid", serverId);
+        if (query.exec() && query.next()) {
+            return SaveResult::Duplicate;
+        }
+    }
+
+    query.prepare(
+        "INSERT INTO messages (user_id, user_nick, my_nick, message, is_outgoing, server_id) "
+        "VALUES (:user_id, :user_nick, :my_nick, :message, 0, :sid)"
+    );
+    query.bindValue(":user_id", userId);
+    query.bindValue(":user_nick", fromNick.isEmpty() ? QString("user_%1").arg(userId) : fromNick);
+    query.bindValue(":my_nick", myNick);
+    query.bindValue(":message", message);
+    query.bindValue(":sid", serverId > 0 ? QVariant(serverId) : QVariant(QMetaType(QMetaType::Int)));
+
+    if (!query.exec()) {
+        qWarning() << "Ошибка сохранения входящего сообщения:" << query.lastError().text();
+        return SaveResult::Error;
+    }
+    return SaveResult::Saved;
+}
+
 QList<MessageEntry> DatabaseClient::getMessageHistory(int userId, const QString &yourNick, int limit) {
     QList<MessageEntry> history;
     
@@ -127,10 +265,10 @@ QList<MessageEntry> DatabaseClient::getMessageHistory(int userId, const QString 
 
     QSqlQuery query = createQuery();
     query.prepare(
-        "SELECT id, user_id, user_nick, message, timestamp, is_outgoing, is_read "
+        "SELECT id, user_id, user_nick, message, timestamp, is_outgoing, is_read, status "
         "FROM messages "
         "WHERE user_id = :user_id AND my_nick = :my_nick "
-        "ORDER BY timestamp ASC "
+        "ORDER BY timestamp ASC, id ASC "
         "LIMIT :limit"
     );
     query.bindValue(":user_id", userId);
@@ -151,6 +289,7 @@ QList<MessageEntry> DatabaseClient::getMessageHistory(int userId, const QString 
         entry.timestamp = query.value(4).toString();
         entry.isOutgoing = query.value(5).toInt() == 1;
         entry.isRead = query.value(6).toInt() == 1;
+        entry.pending = query.value(7).toInt() == 0;
         
         history.append(entry);
     }

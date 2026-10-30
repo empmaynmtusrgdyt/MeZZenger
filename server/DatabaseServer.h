@@ -27,7 +27,10 @@ public:
     QList<QJsonObject> getUsersWithConversations(int userId);
     QJsonObject searchUser(const QString &nick);
 
-    int saveMessage(int fromUserId, int toUserId, const QString &message);
+    // Если clientMsgId уже есть у этого отправителя, возвращает id прежнего сообщения
+    // и выставляет *duplicate = true (новая запись не создаётся).
+    int saveMessage(int fromUserId, int toUserId, const QString &message,
+                    const QString &clientMsgId = QString(), bool *duplicate = nullptr);
     QList<QJsonObject> getUndeliveredMessages(int toUserId);
     bool markMessagesAsDelivered(int toUserId, const QList<int> &messageIds);
     bool markMessagesAsRead(int fromUserId, int toUserId);
