@@ -2,7 +2,7 @@
 #define SERVER_CORE_H
 
 #include <QObject>
-#include <QTcpServer>
+#include <QSslServer>
 #include <QTcpSocket>
 #include <QMap>
 #include <QList>
@@ -17,13 +17,14 @@ public:
     explicit ServerCore(QObject *parent = nullptr);
     ~ServerCore();
 
-    bool start(quint16 port = 5555);
+    bool start(quint16 port = 5555, const QString &certPath = "server.crt",
+               const QString &keyPath = "server.key");
     void stop();
 
     void sendMessageToUser(int userId, int messageId, const QJsonObject &message);
 
 private:
-    QTcpServer m_server;
+    QSslServer m_server;
     DatabaseServer m_database;
     QMap<int, ClientHandler*> m_clients;
 

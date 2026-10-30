@@ -2,18 +2,63 @@
 #include "DatabaseServer.h"
 #include "ClientHandler.h"
 #include <QDebug>
+#include <QFile>
+#include <QSslCertificate>
+#include <QSslConfiguration>
+#include <QSslKey>
+#include <QSslSocket>
+#include <QCryptographicHash>
 
 ServerCore::ServerCore(QObject *parent)
     : QObject(parent)
 {
-    connect(&m_server, &QTcpServer::newConnection, this, &ServerCore::onNewConnection);
+    connect(&m_server, &QTcpServer::pendingConnectionAvailable, this, &ServerCore::onNewConnection);
+    connect(&m_server, &QSslServer::sslErrors, this, [](QSslSocket *socket, const QList<QSslError> &errors) {
+        qWarning() << "Ошибка TLS от" << socket->peerAddress().toString() << ":" << errors;
+    });
+    connect(&m_server, &QSslServer::errorOccurred, this, [](QSslSocket *socket, QAbstractSocket::SocketError) {
+        qWarning() << "Не удалось установить TLS-соединение с" << socket->peerAddress().toString()
+                   << ":" << socket->errorString();
+    });
 }
 
 ServerCore::~ServerCore() {
     stop();
 }
 
-bool ServerCore::start(quint16 port) {
+bool ServerCore::start(quint16 port, const QString &certPath, const QString &keyPath) {
+    if (!QSslSocket::supportsSsl()) {
+        qCritical() << "В этой сборке Qt нет поддержки TLS";
+        return false;
+    }
+
+    QFile certFile(certPath);
+    QFile keyFile(keyPath);
+    if (!certFile.open(QIODevice::ReadOnly) || !keyFile.open(QIODevice::ReadOnly)) {
+        qCritical().noquote() << "Не найден сертификат или ключ TLS (" << certPath << "," << keyPath << ")."
+                              << "Создайте их командой: scripts/gen-cert.sh";
+        return false;
+    }
+
+    QSslCertificate certificate(&certFile, QSsl::Pem);
+    QSslKey key(&keyFile, QSsl::Rsa, QSsl::Pem);
+    if (key.isNull()) {
+        keyFile.seek(0);
+        key = QSslKey(&keyFile, QSsl::Ec, QSsl::Pem);
+    }
+    if (certificate.isNull() || key.isNull()) {
+        qCritical() << "Сертификат или ключ TLS повреждены или в неподдерживаемом формате";
+        return false;
+    }
+
+    QSslConfiguration tls = QSslConfiguration::defaultConfiguration();
+    tls.setLocalCertificate(certificate);
+    tls.setPrivateKey(key);
+    tls.setProtocol(QSsl::TlsV1_2OrLater);
+    tls.setPeerVerifyMode(QSslSocket::VerifyNone);
+    m_server.setSslConfiguration(tls);
+    m_server.setHandshakeTimeout(5000);
+
     if (!m_database.initialize("server.db")) {
         qCritical() << "Не удалось инициализировать базу данных";
         return false;
@@ -24,7 +69,9 @@ bool ServerCore::start(quint16 port) {
         return false;
     }
 
-    qDebug() << "Сервер запущен на порту" << port;
+    qDebug() << "Сервер запущен на порту" << port << "(TLS)";
+    qDebug().noquote() << "Отпечаток сертификата SHA-256:"
+                       << QCryptographicHash::hash(certificate.toDer(), QCryptographicHash::Sha256).toHex(':').toUpper();
     qDebug() << "База данных: server.db";
     return true;
 }

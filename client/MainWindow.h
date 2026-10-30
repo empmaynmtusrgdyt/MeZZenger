@@ -9,7 +9,7 @@
 #include <QLabel>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <QTcpSocket>
+#include <QSslSocket>
 #include <QTimer>
 #include <QMap>
 #include <QJsonObject>
@@ -48,7 +48,8 @@ private:
     QString m_nick;
     QString m_password;
     
-    QTcpSocket *m_socket;
+    QSslSocket *m_socket;
+    bool m_tlsRejected = false;
     QTimer *m_reconnectTimer;
     QByteArray m_buffer;
     

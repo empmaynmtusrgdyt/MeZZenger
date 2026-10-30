@@ -13,3 +13,8 @@ CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 Makefile
+
+# TLS-ключи и сертификаты не коммитим
+*.key
+*.crt
+*.pem

@@ -53,6 +53,8 @@ set(CLIENT_SOURCES
     client/NetworkManager.h
     client/DatabaseClient.cpp
     client/DatabaseClient.h
+    client/TlsTrust.cpp
+    client/TlsTrust.h
     client/styles.qss
 )
 

@@ -4,7 +4,8 @@
 #include <QHBoxLayout>
 #include <QFormLayout>
 #include <QMessageBox>
-#include <QTcpSocket>
+#include <QSslSocket>
+#include "TlsTrust.h"
 #include <QTimer>
 #include <QDebug>
 
@@ -135,7 +136,7 @@ void LoginWindow::sendAuthRequest(const QString &type) {
     m_loginButton->setEnabled(false);
     m_registerButton->setEnabled(false);
 
-    QTcpSocket *socket = new QTcpSocket(this);
+    QSslSocket *socket = new QSslSocket(this);
     QByteArray buffer;
     QTimer *timeoutTimer = new QTimer(this);
     timeoutTimer->setSingleShot(true);
@@ -146,13 +147,17 @@ void LoginWindow::sendAuthRequest(const QString &type) {
     msg["password"] = getPassword();
     QByteArray data = serializeMessage(msg);
 
-    connect(socket, &QTcpSocket::connected, [=]() {
+    // Пока пользователь читает отпечаток сертификата, таймаут не должен сработать
+    connect(socket, &QSslSocket::sslErrors, timeoutTimer, &QTimer::stop);
+    TlsTrust::attach(socket, m_currentHost, m_currentPort, this);
+
+    connect(socket, &QSslSocket::encrypted, [=]() {
         timeoutTimer->stop();
         socket->write(data);
         qDebug() << "Auth data sent";
     });
 
-    connect(socket, &QTcpSocket::readyRead, [=]() mutable {
+    connect(socket, &QSslSocket::readyRead, [=]() mutable {
         buffer.append(socket->readAll());
 
         while (buffer.size() >= (int)HeaderSize) {
@@ -217,5 +222,5 @@ void LoginWindow::sendAuthRequest(const QString &type) {
     });
 
     timeoutTimer->start(5000);
-    socket->connectToHost(m_currentHost, m_currentPort);
+    socket->connectToHostEncrypted(m_currentHost, m_currentPort);
 }

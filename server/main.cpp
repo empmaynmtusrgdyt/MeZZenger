@@ -14,6 +14,11 @@ int main(int argc, char *argv[]) {
     QCommandLineOption portOption(QStringList() << "p" << "port",
                                   "Порт для прослушивания", "port", "5555");
     parser.addOption(portOption);
+
+    QCommandLineOption certOption("cert", "Файл сертификата TLS (PEM)", "file", "server.crt");
+    QCommandLineOption keyOption("key", "Файл закрытого ключа TLS (PEM)", "file", "server.key");
+    parser.addOption(certOption);
+    parser.addOption(keyOption);
     
     parser.process(app);
     
@@ -23,7 +28,7 @@ int main(int argc, char *argv[]) {
     }
     
     ServerCore server;
-    if (!server.start(port)) {
+    if (!server.start(port, parser.value(certOption), parser.value(keyOption))) {
         qCritical() << "Не удалось запустить сервер";
         return 1;
     }

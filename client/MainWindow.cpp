@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "Protocol.h"
+#include "TlsTrust.h"
 #include <QMessageBox>
 #include <QJsonDocument>
 #include <QDateTime>
@@ -14,7 +15,7 @@ MainWindow::MainWindow(const QString &host, int port, const QString &nick,
     , m_port(port)
     , m_nick(nick)
     , m_password(password)
-    , m_socket(new QTcpSocket(this))
+    , m_socket(new QSslSocket(this))
     , m_reconnectTimer(new QTimer(this))
     , m_database(new DatabaseClient(this))
 {
@@ -31,7 +32,12 @@ MainWindow::MainWindow(const QString &host, int port, const QString &nick,
     connect(m_socket, &QTcpSocket::disconnected, this, &MainWindow::onSocketDisconnected);
     connect(m_socket, QOverload<QAbstractSocket::SocketError>::of(&QAbstractSocket::errorOccurred),
             this, &MainWindow::onSocketError);
-    connect(m_socket, &QTcpSocket::connected, this, &MainWindow::onSocketConnected);
+    connect(m_socket, &QSslSocket::encrypted, this, &MainWindow::onSocketConnected);
+    TlsTrust::attach(m_socket, m_host, static_cast<quint16>(m_port), this, [this]() {
+        m_tlsRejected = true;
+        m_reconnectTimer->stop();
+        QTimer::singleShot(0, this, &QWidget::close);
+    });
     
     connect(m_reconnectTimer, &QTimer::timeout, this, &MainWindow::reconnectTimerTimeout);
     m_reconnectTimer->setSingleShot(true);
@@ -174,7 +180,7 @@ void MainWindow::applyStyles() {
 }
 
 void MainWindow::connectToServer() {
-    m_socket->connectToHost(m_host, m_port);
+    m_socket->connectToHostEncrypted(m_host, m_port);
 }
 
 void MainWindow::sendAuthRequest(const QString &type) {
@@ -563,6 +569,9 @@ void MainWindow::markMessagesReadOnServer(int userId) {
 
 void MainWindow::onSocketDisconnected() {
     qDebug() << "Disconnected from server";
+    if (m_tlsRejected) {
+        return;
+    }
     m_reconnectTimer->start(3000);
 }
 
@@ -572,7 +581,7 @@ void MainWindow::onSocketError() {
 
 void MainWindow::reconnectTimerTimeout() {
     qDebug() << "Reconnect timeout, attempting to reconnect";
-    if (!m_socket->isOpen()) {
+    if (m_socket->state() == QAbstractSocket::UnconnectedState) {
         connectToServer();
     }
 }
