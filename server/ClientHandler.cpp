@@ -107,7 +107,7 @@ void ClientHandler::readMessages() {
 
         // Пароль и код приглашения не должны попадать в журнал
         QJsonObject loggable = message;
-        for (const QString &secret : {Protocol::PASSWORD, Protocol::INVITE}) {
+        for (const QString &secret : {Protocol::PASSWORD, Protocol::INVITE, Protocol::OLD_PASSWORD, Protocol::NEW_PASSWORD}) {
             if (loggable.contains(secret)) {
                 loggable[secret] = "***";
             }
@@ -158,6 +158,11 @@ void ClientHandler::processMessage(const QJsonObject &message) {
         case Protocol::MessageType::DeliveryAck:
             if (m_authenticated) {
                 handleDeliveryAck(message);
+            }
+            break;
+        case Protocol::MessageType::ChangePassword:
+            if (m_authenticated) {
+                handleChangePassword(message);
             }
             break;
         case Protocol::MessageType::MarkMessagesRead:
@@ -378,10 +383,45 @@ void ClientHandler::sendAuthResponse(bool success, const QString &message) {
 }
 
 void ClientHandler::sendUserList() {
-    QList<QJsonObject> users = m_database->getUsersWithConversations(m_userId);
-    qDebug() << "Sending conversation partners to" << m_nick << ", count:" << users.size();
+    // Друзей немного, поэтому отдаём всех: клиент показывает их списком, а не ищет по точному нику
+    QList<QJsonObject> users = m_database->getAllUsers(m_userId);
+    for (auto &user : users) {
+        user[Protocol::ONLINE] = m_isOnline && m_isOnline(user["id"].toInt());
+    }
+    qDebug() << "Sending user list to" << m_nick << ", count:" << users.size();
     QJsonObject response = ProtocolHelper::createUserList(users);
     sendMessage(response);
+}
+
+void ClientHandler::handleChangePassword(const QJsonObject &message) {
+    const QString oldPassword = ProtocolHelper::getString(message, Protocol::OLD_PASSWORD);
+    const QString newPassword = ProtocolHelper::getString(message, Protocol::NEW_PASSWORD);
+
+    // Старый пароль можно перебирать так же, как при входе, поэтому считаем попытки по IP
+    const qint64 retryMs = m_authLimiter->retryAfterMs(m_ipKey);
+    if (retryMs > 0) {
+        sendMessage(ProtocolHelper::createChangePasswordResponse(false,
+            QString("Слишком много неудачных попыток. Повторите через %1 мин.").arg((retryMs + 59999) / 60000)));
+        return;
+    }
+
+    if (newPassword.size() < Protocol::MinPasswordLength || newPassword.size() > Protocol::MaxPasswordLength
+        || oldPassword.size() > Protocol::MaxPasswordLength) {
+        sendMessage(ProtocolHelper::createChangePasswordResponse(false,
+            QString("Новый пароль должен быть от %1 до %2 символов").arg(Protocol::MinPasswordLength).arg(Protocol::MaxPasswordLength)));
+        return;
+    }
+    if (!m_database->verifyPassword(m_userId, oldPassword)) {
+        recordAuthFailure();
+        sendMessage(ProtocolHelper::createChangePasswordResponse(false, "Неверный текущий пароль"));
+        return;
+    }
+    if (!m_database->setPassword(m_userId, newPassword)) {
+        sendMessage(ProtocolHelper::createChangePasswordResponse(false, "Не удалось сменить пароль"));
+        return;
+    }
+    qDebug() << "Пароль изменён:" << m_nick;
+    sendMessage(ProtocolHelper::createChangePasswordResponse(true, "Пароль изменён"));
 }
 
 void ClientHandler::handleGetOfflineMessages() {

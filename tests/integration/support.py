@@ -266,7 +266,7 @@ class ServerTestCase(unittest.TestCase):
         return self.login(nick, password)
 
 
-def sync(conn, timeout=5):
+def sync(conn, timeout=5, presence=False):
     """Барьер: сервер обрабатывает сообщения одного соединения по порядку, поэтому ответ на служебный
     запрос приходит после всего, что было отправлено раньше. Возвращает всё, что пришло до барьера.
     Чтобы увидеть доставку другому пользователю, сначала синхронизируйте отправителя, потом получателя."""
@@ -277,7 +277,8 @@ def sync(conn, timeout=5):
         barrier = [m for m in messages if m.get("type") == "search_user_response"]
         if barrier:
             messages.remove(barrier[0])
-            return messages
+            # Рассылка присутствия идёт вперемешку с остальным; тестам доставки она не нужна
+            return messages if presence else [m for m in messages if m.get("type") != "presence"]
         messages += conn._read_for(0.5)
     raise AssertionError("сервер не ответил на служебный запрос")
 

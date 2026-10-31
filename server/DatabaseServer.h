@@ -28,6 +28,7 @@ public:
     int getUserIdByNick(const QString &nick);
     QString getNickById(int userId);
     bool verifyPassword(int userId, const QString &password);
+    bool setPassword(int userId, const QString &newPassword);
     QList<QJsonObject> getAllUsers(int excludeUserId = -1);
     QList<QJsonObject> getUsersWithConversations(int userId);
     QJsonObject searchUser(const QString &nick);

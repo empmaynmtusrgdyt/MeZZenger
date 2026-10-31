@@ -5,6 +5,7 @@
 #include <QCommandLineParser>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSettings>
@@ -107,6 +108,17 @@ int main(int argc, char *argv[]) {
                     emit edits[1]->returnPressed();
                 } else if (action == "dump") {
                     report("view", mainWindow->findChild<QTextEdit *>()->toPlainText());
+                } else if (action == "contacts") {
+                    QStringList items;
+                    auto *list = mainWindow->findChild<QListWidget *>();
+                    for (int i = 0; i < list->count(); ++i) {
+                        if (!list->item(i)->isHidden()) {
+                            items << list->item(i)->text();
+                        }
+                    }
+                    report("contacts", items.join('|'));
+                } else if (action == "wintitle") {
+                    report("wintitle", mainWindow->windowTitle());
                 } else if (action == "setpin") {
                     QSettings().setValue(pinKey, arg);
                 }

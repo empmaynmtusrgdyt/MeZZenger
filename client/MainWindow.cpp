@@ -1,13 +1,20 @@
 #include "MainWindow.h"
 #include "Protocol.h"
 #include "ServerConnection.h"
+#include <QApplication>
+#include <QInputDialog>
+#include <QMenuBar>
 #include <QMessageBox>
+#include <QPainter>
+#include <QPixmap>
 #include <QTimer>
 #include <QUuid>
 #include <QJsonDocument>
 #include <QDateTime>
 #include <QScrollBar>
+#include <QColor>
 #include <QFont>
+#include <algorithm>
 #include <QDebug>
 
 MainWindow::MainWindow(ServerConnection *connection, const QString &nick, QWidget *parent)
@@ -23,6 +30,7 @@ MainWindow::MainWindow(ServerConnection *connection, const QString &nick, QWidge
     m_database->initialize("mezzenger_client.db");
     
     setupUI();
+    setupMenu();
     applyStyles();
     
     m_connection->setParent(this);
@@ -62,8 +70,9 @@ void MainWindow::setupUI() {
     leftLayout->addWidget(titleLabel);
     
     m_searchEdit = new QLineEdit();
-    m_searchEdit->setPlaceholderText("Найти пользователя...");
-    connect(m_searchEdit, &QLineEdit::returnPressed, this, &MainWindow::onSearchRequested);
+    m_searchEdit->setPlaceholderText("Поиск среди пользователей...");
+    connect(m_searchEdit, &QLineEdit::textChanged, this, &MainWindow::onFilterChanged);
+    connect(m_searchEdit, &QLineEdit::returnPressed, this, &MainWindow::onFilterEntered);
     leftLayout->addWidget(m_searchEdit);
     
     m_contactsList = new QListWidget();
@@ -79,14 +88,16 @@ void MainWindow::setupUI() {
     rightLayout->setSpacing(10);
     rightLayout->setContentsMargins(15, 15, 15, 15);
     
-    QLabel *chatTitleLabel = new QLabel("Выберите контакт для начала переписки");
-    chatTitleLabel->setStyleSheet("font-size: 16px; font-weight: bold;");
-    chatTitleLabel->setAlignment(Qt::AlignCenter);
-    rightLayout->addWidget(chatTitleLabel);
+    m_chatTitle = new QLabel();
+    m_chatTitle->setStyleSheet("font-size: 16px; font-weight: bold;");
+    m_chatTitle->setAlignment(Qt::AlignCenter);
+    rightLayout->addWidget(m_chatTitle);
     
     m_messagesArea = new QTextEdit();
     m_messagesArea->setReadOnly(true);
     m_messagesArea->setStyleSheet("background-color: #1e1e1e;");
+    m_messagesArea->setPlaceholderText("Здесь появится переписка.\nВыберите пользователя в списке слева (точка слева от ника — он в сети).");
+    updateChatTitle();
     rightLayout->addWidget(m_messagesArea, 1);
     
     QHBoxLayout *inputLayout = new QHBoxLayout();
@@ -107,6 +118,13 @@ void MainWindow::setupUI() {
     
     rightLayout->addLayout(inputLayout);
     mainLayout->addWidget(rightPanel, 1);
+}
+
+void MainWindow::setupMenu() {
+    QMenu *account = menuBar()->addMenu("Аккаунт");
+    account->addAction("Сменить пароль...", this, &MainWindow::onChangePassword);
+    account->addSeparator();
+    account->addAction("Выйти", this, &QWidget::close);
 }
 
 void MainWindow::applyStyles() {
@@ -201,18 +219,11 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
             
             int fromUserId = message[Protocol::FROM_ID].toInt(-1);
             if (fromUserId <= 0) {
-                for (const auto &user : m_allUsers) {
-                    if (user.nick == fromNick) {
-                        fromUserId = user.id;
-                        break;
-                    }
-                }
+                fromUserId = findUserIdByNick(fromNick);
             }
             
             if (fromUserId > 0) {
-                if (!m_users.contains(fromUserId)) {
-                    addUserToSidebar(fromUserId, fromNick);
-                }
+                upsertUser(fromUserId, fromNick, m_users.value(fromUserId).online);
                 
                 int serverId = message[Protocol::ID].toInt(0);
                 auto saved = m_database->saveIncoming(fromUserId, m_nick, fromNick, text, serverId);
@@ -232,6 +243,9 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
                         markContactAsUnread(fromUserId);
                         qDebug() << "Непрочитанное сообщение от" << fromNick;
                     }
+                    if (fromUserId != m_selectedUserId || !isActiveWindow()) {
+                        notifyIncoming(fromNick, text);
+                    }
                 }
             } else {
                 qDebug() << "Не найден ID для ника:" << fromNick;
@@ -244,6 +258,8 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
             qDebug() << "Received offline messages, count:" << messagesArray.size();
             bool affectsSelectedContact = false;
             QList<int> ackIds;
+            QString lastNewNick, lastNewText;
+            int newCount = 0;
             for (const QJsonValue &val : messagesArray) {
                 QJsonObject msg = val.toObject();
                 QString fromNick = msg["from_nick"].toString();
@@ -252,18 +268,11 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
                 
                 int fromUserId = msg["from_id"].toInt(-1);
                 if (fromUserId <= 0) {
-                    for (const auto &user : m_allUsers) {
-                        if (user.nick == fromNick) {
-                            fromUserId = user.id;
-                            break;
-                        }
-                    }
+                    fromUserId = findUserIdByNick(fromNick);
                 }
                 
                 if (fromUserId > 0) {
-                    if (!m_users.contains(fromUserId)) {
-                        addUserToSidebar(fromUserId, fromNick);
-                    }
+                    upsertUser(fromUserId, fromNick, m_users.value(fromUserId).online);
                     
                     int serverId = msg["id"].toInt(0);
                     auto saved = m_database->saveIncoming(fromUserId, m_nick, fromNick, text, serverId);
@@ -282,10 +291,20 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
                     } else {
                         markContactAsUnread(fromUserId);
                     }
+                    if (fromUserId != m_selectedUserId || !isActiveWindow()) {
+                        lastNewNick = fromNick;
+                        lastNewText = text;
+                        ++newCount;
+                    }
                 }
             }
             if (affectsSelectedContact) {
                 loadMessageHistory(m_selectedUserId);
+            }
+            if (newCount == 1) {
+                notifyIncoming(lastNewNick, lastNewText);
+            } else if (newCount > 1) {
+                notifyIncoming("MeZZenger", QString("Новых сообщений: %1").arg(newCount));
             }
             if (!ackIds.isEmpty()) {
                 sendDeliveryAck(ackIds);
@@ -308,42 +327,25 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
             break;
         }
         
-        case Protocol::MessageType::SearchUserResponse: {
-            bool success = ProtocolHelper::getBool(message, Protocol::SUCCESS);
-            QString msg = ProtocolHelper::getString(message, Protocol::MESSAGE);
-            qDebug() << "Search user response:" << success << msg;
-            
-            if (success) {
-                QJsonObject userObj = message["user"].toObject();
-                int userId = userObj["id"].toInt();
-                QString nick = userObj["nick"].toString();
-                
-                if (userId > 0 && !nick.isEmpty()) {
-                    if (!m_users.contains(userId)) {
-                        addUserToSidebar(userId, nick);
-                    }
-                    
-                    m_selectedUserId = userId;
-                    m_selectedUserNick = nick;
-                    
-                    m_messageEdit->setDisabled(false);
-                    m_sendButton->setDisabled(false);
-                    m_messageEdit->setFocus();
-                    
-                    loadMessageHistory(userId);
-                    
-                    for (int i = 0; i < m_contactsList->count(); ++i) {
-                        QListWidgetItem *item = m_contactsList->item(i);
-                        if (item->data(Qt::UserRole).toInt() == userId) {
-                            m_contactsList->setCurrentItem(item);
-                            break;
-                        }
-                    }
-                }
-            } else {
-                QMessageBox::information(this, "Поиск", msg);
+        case Protocol::MessageType::Presence: {
+            const int userId = message[Protocol::ID].toInt();
+            const QString nick = ProtocolHelper::getString(message, Protocol::NICK);
+            if (userId > 0 && !nick.isEmpty()) {
+                upsertUser(userId, nick, ProtocolHelper::getBool(message, Protocol::ONLINE));
             }
-            m_searchEdit->clear();
+            break;
+        }
+
+        case Protocol::MessageType::ChangePasswordResponse: {
+            const bool success = ProtocolHelper::getBool(message, Protocol::SUCCESS);
+            const QString text = ProtocolHelper::getString(message, Protocol::MESSAGE);
+            if (success) {
+                m_connection->updatePassword(m_pendingNewPassword);
+                QMessageBox::information(this, "Смена пароля", text);
+            } else {
+                QMessageBox::warning(this, "Смена пароля", text);
+            }
+            m_pendingNewPassword.clear();
             break;
         }
         
@@ -354,34 +356,30 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
 
 void MainWindow::updateUserList(const QList<QJsonObject> &users) {
     qDebug() << "Updating user list, count:" << users.size();
-    m_contactsList->clear();
+    const QMap<int, UserInfo> previous = m_users;
     m_users.clear();
-    m_allUsers.clear();
     
     for (const auto &user : users) {
-        int id = user["id"].toInt();
-        QString nick = user["nick"].toString();
-        qDebug() << "User:" << id << nick;
-        
         UserInfo info;
-        info.id = id;
-        info.nick = nick;
-        info.unread = false;
-        
-        m_allUsers[id] = info;
+        info.id = user["id"].toInt();
+        info.nick = user["nick"].toString();
+        info.online = user[Protocol::ONLINE].toBool();
+        info.unread = previous.value(info.id).unread;
+        m_users[info.id] = info;
     }
     
     // Получатель неподтверждённого сообщения может быть неизвестен серверу (переписки ещё нет)
     for (const auto &pending : m_database->getPendingOutgoing(m_nick)) {
-        if (!m_allUsers.contains(pending.userId) && !pending.peerNick.isEmpty()) {
+        if (!m_users.contains(pending.userId) && !pending.peerNick.isEmpty()) {
             UserInfo info;
             info.id = pending.userId;
             info.nick = pending.peerNick;
-            m_allUsers[pending.userId] = info;
+            m_users[info.id] = info;
         }
     }
     
-    refreshSidebar();
+    rebuildSidebar();
+    updateChatTitle();
     resendPendingMessages();
     requestOfflineMessages();
 }
@@ -411,46 +409,91 @@ void MainWindow::sendDeliveryAck(const QList<int> &ids) {
     m_connection->send(ProtocolHelper::createDeliveryAck(ids));
 }
 
-void MainWindow::refreshSidebar() {
-    QList<int> partnerIds = m_database->getConversationPartners(m_nick);
-    qDebug() << "Conversation partners count:" << partnerIds.size();
-    
-    m_contactsList->clear();
-    m_users.clear();
-    
-    for (int id : partnerIds) {
-        if (m_allUsers.contains(id)) {
-            UserInfo info = m_allUsers[id];
-            m_users[id] = info;
-            
-            QListWidgetItem *item = new QListWidgetItem(info.nick);
-            item->setData(Qt::UserRole, id);
-            m_contactsList->addItem(item);
+int MainWindow::findUserIdByNick(const QString &nick) const {
+    for (const auto &user : m_users) {
+        if (user.nick == nick) {
+            return user.id;
+        }
+    }
+    return -1;
+}
+
+void MainWindow::upsertUser(int userId, const QString &nick, bool online) {
+    UserInfo &info = m_users[userId];
+    const bool changed = info.id != userId || info.nick != nick || info.online != online;
+    info.id = userId;
+    info.nick = nick;
+    info.online = online;
+    if (changed) {
+        rebuildSidebar();
+        if (userId == m_selectedUserId) {
+            updateChatTitle();
         }
     }
 }
 
-void MainWindow::addUserToSidebar(int userId, const QString &nick) {
-    if (m_users.contains(userId)) {
-        return;
+// Все известные пользователи: сначала те, кто в сети, затем по алфавиту
+void MainWindow::rebuildSidebar() {
+    QList<UserInfo> sorted = m_users.values();
+    std::sort(sorted.begin(), sorted.end(), [](const UserInfo &a, const UserInfo &b) {
+        if (a.online != b.online) {
+            return a.online;
+        }
+        return a.nick.compare(b.nick, Qt::CaseInsensitive) < 0;
+    });
+    
+    m_contactsList->clear();
+    for (const UserInfo &info : sorted) {
+        QListWidgetItem *item = new QListWidgetItem((info.online ? QString::fromUtf8("● ") : QString::fromUtf8("○ ")) + info.nick);
+        item->setData(Qt::UserRole, info.id);
+        if (!info.online) {
+            item->setForeground(QColor("#888888"));
+        }
+        QFont font = item->font();
+        font.setBold(info.unread);
+        item->setFont(font);
+        m_contactsList->addItem(item);
+        if (info.id == m_selectedUserId) {
+            m_contactsList->setCurrentItem(item);
+        }
     }
-    
-    UserInfo info;
-    info.id = userId;
-    info.nick = nick;
-    info.unread = false;
-    
-    m_users[userId] = info;
-    m_allUsers[userId] = info;
-    
-    QListWidgetItem *item = new QListWidgetItem(nick);
-    item->setData(Qt::UserRole, userId);
-    m_contactsList->addItem(item);
+    applyFilter();
+    updateWindowTitle();
+}
+
+void MainWindow::applyFilter() {
+    const QString filter = m_searchEdit->text().trimmed();
+    for (int i = 0; i < m_contactsList->count(); ++i) {
+        QListWidgetItem *item = m_contactsList->item(i);
+        const QString nick = m_users.value(item->data(Qt::UserRole).toInt()).nick;
+        item->setHidden(!filter.isEmpty() && !nick.contains(filter, Qt::CaseInsensitive));
+    }
+}
+
+void MainWindow::onFilterChanged(const QString &) {
+    applyFilter();
+}
+
+// Enter в поиске открывает первого из найденных
+void MainWindow::onFilterEntered() {
+    for (int i = 0; i < m_contactsList->count(); ++i) {
+        QListWidgetItem *item = m_contactsList->item(i);
+        if (!item->isHidden()) {
+            selectUser(item->data(Qt::UserRole).toInt());
+            m_searchEdit->clear();
+            return;
+        }
+    }
 }
 
 void MainWindow::onContactClicked(QListWidgetItem *item) {
-    int userId = item->data(Qt::UserRole).toInt();
-    
+    selectUser(item->data(Qt::UserRole).toInt());
+}
+
+void MainWindow::selectUser(int userId) {
+    if (!m_users.contains(userId)) {
+        return;
+    }
     clearContactUnread(userId);
     
     m_selectedUserId = userId;
@@ -460,9 +503,81 @@ void MainWindow::onContactClicked(QListWidgetItem *item) {
     m_sendButton->setDisabled(false);
     m_messageEdit->setFocus();
     
+    for (int i = 0; i < m_contactsList->count(); ++i) {
+        QListWidgetItem *item = m_contactsList->item(i);
+        if (item->data(Qt::UserRole).toInt() == userId) {
+            m_contactsList->setCurrentItem(item);
+            break;
+        }
+    }
+    
+    updateChatTitle();
     loadMessageHistory(userId);
     markMessagesReadOnServer(userId);
     m_database->markMessagesAsRead(userId, m_nick);
+}
+
+void MainWindow::updateChatTitle() {
+    if (m_selectedUserId <= 0 || !m_users.contains(m_selectedUserId)) {
+        m_chatTitle->setText(m_users.isEmpty() ? "Пока нет других пользователей" : "Выберите пользователя для переписки");
+        return;
+    }
+    const UserInfo &user = m_users[m_selectedUserId];
+    m_chatTitle->setText(user.nick + (user.online ? " — в сети" : " — не в сети"));
+}
+
+void MainWindow::updateWindowTitle() {
+    int unread = 0;
+    for (const auto &user : m_users) {
+        unread += user.unread ? 1 : 0;
+    }
+    setWindowTitle((unread > 0 ? QString("(%1) ").arg(unread) : QString()) + "MeZZenger - " + m_nick);
+}
+
+void MainWindow::notifyIncoming(const QString &nick, const QString &text) {
+    QApplication::alert(this);
+    if (!m_tray && QSystemTrayIcon::isSystemTrayAvailable()) {
+        QPixmap pixmap(64, 64);
+        pixmap.fill(Qt::transparent);
+        QPainter painter(&pixmap);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setBrush(QColor("#4caf50"));
+        painter.setPen(Qt::NoPen);
+        painter.drawEllipse(4, 4, 56, 56);
+        painter.end();
+        m_tray = new QSystemTrayIcon(QIcon(pixmap), this);
+        m_tray->show();
+    }
+    if (m_tray) {
+        m_tray->showMessage(nick, text.left(120), QSystemTrayIcon::Information, 5000);
+    }
+}
+
+void MainWindow::onChangePassword() {
+    bool ok = false;
+    const QString oldPassword = QInputDialog::getText(this, "Смена пароля", "Текущий пароль:", QLineEdit::Password, QString(), &ok);
+    if (!ok) {
+        return;
+    }
+    const QString newPassword = QInputDialog::getText(this, "Смена пароля", "Новый пароль:", QLineEdit::Password, QString(), &ok);
+    if (!ok) {
+        return;
+    }
+    if (newPassword.size() < Protocol::MinPasswordLength || newPassword.size() > Protocol::MaxPasswordLength) {
+        QMessageBox::warning(this, "Смена пароля", QString("Пароль должен быть от %1 до %2 символов")
+                                                      .arg(Protocol::MinPasswordLength).arg(Protocol::MaxPasswordLength));
+        return;
+    }
+    const QString repeated = QInputDialog::getText(this, "Смена пароля", "Повторите новый пароль:", QLineEdit::Password, QString(), &ok);
+    if (!ok) {
+        return;
+    }
+    if (repeated != newPassword) {
+        QMessageBox::warning(this, "Смена пароля", "Пароли не совпадают");
+        return;
+    }
+    m_pendingNewPassword = newPassword;
+    m_connection->send(ProtocolHelper::createChangePassword(oldPassword, newPassword));
 }
 
 void MainWindow::loadMessageHistory(int userId) {
@@ -500,50 +615,19 @@ void MainWindow::appendMessage(const QString &fromNick, const QString &text,
 }
 
 void MainWindow::markContactAsUnread(int userId) {
-    if (!m_users.contains(userId)) {
+    if (!m_users.contains(userId) || m_users[userId].unread) {
         return;
     }
-    
     m_users[userId].unread = true;
-    
-    for (int i = 0; i < m_contactsList->count(); ++i) {
-        QListWidgetItem *item = m_contactsList->item(i);
-        if (item->data(Qt::UserRole).toInt() == userId) {
-            QFont font = item->font();
-            font.setBold(true);
-            item->setFont(font);
-            break;
-        }
-    }
+    rebuildSidebar();
 }
 
 void MainWindow::clearContactUnread(int userId) {
-    if (!m_users.contains(userId)) {
+    if (!m_users.contains(userId) || !m_users[userId].unread) {
         return;
     }
-    
     m_users[userId].unread = false;
-    
-    for (int i = 0; i < m_contactsList->count(); ++i) {
-        QListWidgetItem *item = m_contactsList->item(i);
-        if (item->data(Qt::UserRole).toInt() == userId) {
-            QFont font = item->font();
-            font.setBold(false);
-            item->setFont(font);
-            break;
-        }
-    }
-}
-
-void MainWindow::onSearchRequested() {
-    QString nick = m_searchEdit->text().trimmed();
-    if (nick.isEmpty()) {
-        return;
-    }
-    
-    qDebug() << "Searching for user:" << nick;
-    
-    m_connection->send(ProtocolHelper::createSearchUserMessage(nick));
+    rebuildSidebar();
 }
 
 void MainWindow::onSendMessagePressed() {

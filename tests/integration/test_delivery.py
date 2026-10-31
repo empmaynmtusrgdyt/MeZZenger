@@ -189,21 +189,18 @@ class BacklogTests(ServerTestCase):
 
 
 class ContactsTests(ServerTestCase):
-    def test_user_list_contains_conversation_partners(self):
+    def test_user_list_contains_everyone_else_with_online_flag(self):
         alice = self.user("alice")
         self.register("bob")
         self.register("carol")
-        send_message(alice, "bob", "hi", cid())
-        alice.recv_type("message_ack")
 
-        bob_conn, _ = auth(self.server, "login", "bob", "goodpass", keep=True)
-        self.conns.append(bob_conn)
-        users = bob_conn.recv_type("user_list")[0]["users"]
-        self.assertEqual([u["nick"] for u in users], ["alice"])
+        users = {u["nick"]: u["online"] for u in self.server_user_list("carol")}
+        self.assertEqual(users, {"alice": True, "bob": False})
 
-        carol_conn, _ = auth(self.server, "login", "carol", "goodpass", keep=True)
-        self.conns.append(carol_conn)
-        self.assertEqual(carol_conn.recv_type("user_list")[0]["users"], [])
+    def server_user_list(self, nick):
+        conn, _ = auth(self.server, "login", nick, "goodpass", keep=True)
+        self.conns.append(conn)
+        return conn.recv_type("user_list")[0]["users"]
 
     def test_search_user(self):
         alice = self.user("alice")

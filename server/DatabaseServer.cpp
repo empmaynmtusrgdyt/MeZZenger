@@ -304,6 +304,22 @@ QString DatabaseServer::getNickById(int userId) {
     return query.value(0).toString();
 }
 
+bool DatabaseServer::setPassword(int userId, const QString &newPassword) {
+    if (userId <= 0 || newPassword.size() < Protocol::MinPasswordLength
+        || newPassword.size() > Protocol::MaxPasswordLength) {
+        return false;
+    }
+    QSqlQuery update = createQuery();
+    update.prepare("UPDATE users SET password_hash = :hash WHERE id = :id");
+    update.bindValue(":hash", hashPassword(newPassword));
+    update.bindValue(":id", userId);
+    if (!update.exec() || update.numRowsAffected() != 1) {
+        qWarning() << "Ошибка смены пароля:" << update.lastError().text();
+        return false;
+    }
+    return true;
+}
+
 bool DatabaseServer::verifyPassword(int userId, const QString &password) {
     if (userId <= 0) {
         return false;

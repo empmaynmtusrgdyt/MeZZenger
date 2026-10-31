@@ -23,7 +23,10 @@ namespace Protocol {
         SearchUserResponse,
         MarkMessagesRead,
         MessageAck,
-        DeliveryAck
+        DeliveryAck,
+        Presence,
+        ChangePassword,
+        ChangePasswordResponse
     };
 
     inline const QString TYPE = "type";
@@ -42,6 +45,9 @@ namespace Protocol {
     inline const QString CLIENT_MSG_ID = "client_msg_id";
     inline const QString INVITE = "invite";
     inline const QString PROTOCOL = "protocol";
+    inline const QString ONLINE = "online";
+    inline const QString OLD_PASSWORD = "old_password";
+    inline const QString NEW_PASSWORD = "new_password";
 
     // Версия протокола. Увеличивайте при любом несовместимом изменении (смена смысла полей,
     // новые обязательные поля или сообщения). Добавление необязательных полей версию не меняет.
@@ -150,6 +156,32 @@ public:
         return obj;
     }
 
+    // Сервер -> всем вошедшим: пользователь появился в сети, вышел или только что зарегистрировался.
+    static QJsonObject createPresence(int userId, const QString &nick, bool online) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "presence";
+        obj[Protocol::ID] = userId;
+        obj[Protocol::NICK] = nick;
+        obj[Protocol::ONLINE] = online;
+        return obj;
+    }
+
+    static QJsonObject createChangePassword(const QString &oldPassword, const QString &newPassword) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "change_password";
+        obj[Protocol::OLD_PASSWORD] = oldPassword;
+        obj[Protocol::NEW_PASSWORD] = newPassword;
+        return obj;
+    }
+
+    static QJsonObject createChangePasswordResponse(bool success, const QString &message) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "change_password_response";
+        obj[Protocol::SUCCESS] = success;
+        obj[Protocol::MESSAGE] = message;
+        return obj;
+    }
+
     static QJsonObject createGetOfflineMessages() {
         QJsonObject obj;
         obj[Protocol::TYPE] = "get_offline_messages";
@@ -216,6 +248,9 @@ public:
         if (type == "mark_messages_read") return Protocol::MessageType::MarkMessagesRead;
         if (type == "message_ack") return Protocol::MessageType::MessageAck;
         if (type == "delivery_ack") return Protocol::MessageType::DeliveryAck;
+        if (type == "presence") return Protocol::MessageType::Presence;
+        if (type == "change_password") return Protocol::MessageType::ChangePassword;
+        if (type == "change_password_response") return Protocol::MessageType::ChangePasswordResponse;
         return Protocol::MessageType::Error;
     }
 

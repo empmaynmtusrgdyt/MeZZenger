@@ -6,6 +6,7 @@
 #include <QTextEdit>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QSystemTrayIcon>
 #include <QLabel>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -20,6 +21,7 @@ struct UserInfo {
     int id;
     QString nick;
     bool unread = false;
+    bool online = false;
 };
 
 class MainWindow : public QMainWindow {
@@ -32,7 +34,9 @@ public:
 
 private slots:
     void onContactClicked(QListWidgetItem *item);
-    void onSearchRequested();
+    void onFilterChanged(const QString &text);
+    void onFilterEntered();
+    void onChangePassword();
     void onSendMessageClicked();
     void onSendMessagePressed();
 
@@ -44,6 +48,9 @@ private:
     
     QListWidget *m_contactsList;
     QLineEdit *m_searchEdit;
+    QLabel *m_chatTitle;
+    QSystemTrayIcon *m_tray = nullptr;
+    QString m_pendingNewPassword;
     QTextEdit *m_messagesArea;
     QLineEdit *m_messageEdit;
     QPushButton *m_sendButton;
@@ -52,7 +59,6 @@ private:
     QString m_selectedUserNick;
     
     QMap<int, UserInfo> m_users;
-    QMap<int, UserInfo> m_allUsers;
     
     void setupUI();
     void applyStyles();
@@ -62,8 +68,15 @@ private:
     void sendDeliveryAck(const QList<int> &ids);
     void processServerMessage(const QJsonObject &message);
     void updateUserList(const QList<QJsonObject> &users);
-    void refreshSidebar();
-    void addUserToSidebar(int userId, const QString &nick);
+    void setupMenu();
+    void upsertUser(int userId, const QString &nick, bool online);
+    void rebuildSidebar();
+    void applyFilter();
+    void selectUser(int userId);
+    void updateChatTitle();
+    void updateWindowTitle();
+    void notifyIncoming(const QString &nick, const QString &text);
+    int findUserIdByNick(const QString &nick) const;
     void loadMessageHistory(int userId);
     void appendMessage(const QString &fromNick, const QString &text, const QString &timestamp, bool isOutgoing, bool isRead, bool pending = false);
     void markContactAsUnread(int userId);

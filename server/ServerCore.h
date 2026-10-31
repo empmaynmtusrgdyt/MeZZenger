@@ -35,6 +35,8 @@ private:
     int m_totalConnections = 0;
 
     void onNewConnection();
+    bool isOnline(int userId) const;
+    void broadcastPresence(int userId, const QString &nick, bool online);
 };
 
 #endif

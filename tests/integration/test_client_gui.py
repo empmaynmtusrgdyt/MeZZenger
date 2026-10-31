@@ -1,4 +1,5 @@
 """Настоящий клиент (LoginWindow -> MainWindow) под управлением client_harness, без показа окон."""
+import time
 import unittest
 
 from support import HarnessRun, ServerTestCase, auth
@@ -112,6 +113,48 @@ class ClientGuiTests(ServerTestCase):
         run.finish()
         self.assertGreater(self.server.log().count('"login"'), before, run.events())
         self.assertEqual(run.end_state()["main_visible"], "1")
+
+    def test_sidebar_lists_everyone_with_online_marks(self):
+        self.register("alice", "pass1234")
+        self.register("bob", "pass1234")
+        self.register("carol", "pass1234")
+        self.login("bob", "pass1234")
+        run = self.run_client("alice", script="2000:contacts", duration=3500).finish()
+        self.assertEqual(run.of("contacts"), ["● bob|○ carol"], run.events())
+
+    def test_presence_updates_the_sidebar_live(self):
+        self.register("alice", "pass1234")
+        self.register("bob", "pass1234")
+        run = self.run_client("alice", script="1500:contacts,4000:contacts,6500:contacts", duration=8000)
+        self.wait_contacts(run, 1)
+        bob = self.login("bob", "pass1234")
+        self.wait_contacts(run, 2)
+        bob.close()
+        run.finish()
+        self.assertEqual(run.of("contacts"), ["○ bob", "● bob", "○ bob"])
+
+    def wait_contacts(self, run, count, timeout=15):
+        deadline = time.time() + timeout
+        while len(run.of("contacts")) < count and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertGreaterEqual(len(run.of("contacts")), count, run.events())
+
+    def test_filter_narrows_the_list(self):
+        for nick in ("alice", "bob", "bobby", "carol"):
+            self.register(nick, "pass1234")
+        run = self.run_client("alice", script="1500:contacts", duration=3000).finish()
+        self.assertEqual(run.of("contacts"), ["○ bob|○ bobby|○ carol"])
+
+    def test_incoming_message_marks_the_window_title(self):
+        self.register("alice", "pass1234")
+        bob = self.user("bob", "pass1234")
+        run = self.run_client("alice", script="4000:wintitle", duration=5000)
+        self.assertIsNotNone(run.wait_for("login-successful"))
+        run.wait_for("login-successful")
+        time.sleep(1.5)
+        bob.send({"type": "message", "to_nick": "alice", "text": "ping", "client_msg_id": "t1"})
+        run.finish()
+        self.assertEqual(run.of("wintitle"), ["(1) MeZZenger - alice"], run.events())
 
 
 if __name__ == "__main__":

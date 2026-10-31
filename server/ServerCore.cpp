@@ -101,6 +101,7 @@ void ServerCore::onNewConnection() {
         ++m_totalConnections;
 
         ClientHandler *handler = new ClientHandler(socket, &m_database, &m_authLimiter, this);
+        handler->setOnlineCheck([this](int userId) { return isOnline(userId); });
         connect(handler, &QObject::destroyed, this, [this, ip]() {
             --m_totalConnections;
             if (--m_connectionsPerIp[ip] <= 0) {
@@ -116,6 +117,7 @@ void ServerCore::onNewConnection() {
             if (m_clients.contains(userId) && m_clients[userId] == handler) {
                 m_clients.remove(userId);
                 qDebug() << "Клиент" << userId << "удалён из карты";
+                broadcastPresence(userId, handler->getNick(), false);
             }
             handler->deleteLater();
         });
@@ -127,8 +129,24 @@ void ServerCore::onNewConnection() {
             }
             m_clients[userId] = handler;
             qDebug() << "Клиент" << userId << "аутентифицирован и добавлен в карту";
+            broadcastPresence(userId, handler->getNick(), true);
         });
 
+    }
+}
+
+bool ServerCore::isOnline(int userId) const {
+    ClientHandler *handler = m_clients.value(userId, nullptr);
+    return handler && handler->isAuthenticated();
+}
+
+// Присутствие рассылается всем остальным вошедшим; новая регистрация тоже приходит как "в сети"
+void ServerCore::broadcastPresence(int userId, const QString &nick, bool online) {
+    const QJsonObject message = ProtocolHelper::createPresence(userId, nick, online);
+    for (auto it = m_clients.constBegin(); it != m_clients.constEnd(); ++it) {
+        if (it.key() != userId && it.value()->isAuthenticated()) {
+            it.value()->sendMessage(message);
+        }
     }
 }
 

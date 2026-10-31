@@ -6,6 +6,7 @@
 #include <QByteArray>
 #include <QJsonObject>
 #include <QTimer>
+#include <functional>
 #include "Protocol.h"
 #include "RateLimiter.h"
 
@@ -24,6 +25,9 @@ public:
     bool isAuthenticated() const { return m_authenticated; }
 
     void sendMessage(const QJsonObject &message);
+
+    // ServerCore сообщает, какие пользователи сейчас в сети (для user_list)
+    void setOnlineCheck(std::function<bool(int)> check) { m_isOnline = std::move(check); }
 
 signals:
     void messageReady(int toUserId, int messageId, const QJsonObject &message);
@@ -47,6 +51,7 @@ private:
     QString m_nick;
     bool m_authenticated = false;
     QByteArray m_buffer;
+    std::function<bool(int)> m_isOnline;
 
     void processMessage(const QJsonObject &message);
     void handleLogin(const QJsonObject &message);
@@ -55,6 +60,7 @@ private:
     void handleSearchUser(const QJsonObject &message);
     void handleMarkMessagesRead(const QJsonObject &message);
     void handleDeliveryAck(const QJsonObject &message);
+    void handleChangePassword(const QJsonObject &message);
 
     void sendAuthResponse(bool success, const QString &message);
     bool checkProtocolVersion(const QJsonObject &message);

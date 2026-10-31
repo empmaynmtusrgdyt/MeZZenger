@@ -33,6 +33,9 @@ public:
     // Сообщения, пришедшие после ответа на вход, удерживаются, пока потребитель не готов
     void startDispatch();
 
+    // После смены пароля: переподключение должно входить с новым
+    void updatePassword(const QString &password) { m_password = password; }
+
     bool isAuthenticated() const { return m_authenticated; }
     void send(const QJsonObject &message);
 
