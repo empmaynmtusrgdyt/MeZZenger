@@ -18,3 +18,5 @@ Makefile
 *.key
 *.crt
 *.pem
+__pycache__/
+*.pyc
