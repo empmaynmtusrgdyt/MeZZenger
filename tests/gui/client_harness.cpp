@@ -80,9 +80,9 @@ int main(int argc, char *argv[]) {
     login.show();
     MainWindow *mainWindow = nullptr;
 
-    QObject::connect(&login, &LoginWindow::loginSuccessful, [&]() {
+    QObject::connect(&login, &LoginWindow::loginSuccessful, [&](ServerConnection *connection) {
         report("login-successful");
-        mainWindow = new MainWindow(login.getHost(), login.getPort(), login.getNick(), login.getPassword());
+        mainWindow = new MainWindow(connection, login.getNick());
         mainWindow->show();
         login.hide();
 

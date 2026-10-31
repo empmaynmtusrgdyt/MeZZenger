@@ -9,13 +9,12 @@
 #include <QLabel>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <QSslSocket>
-#include <QTimer>
 #include <QMap>
 #include <QJsonObject>
-#include <QAbstractSocket>
 #include "DatabaseClient.h"
 #include "Protocol.h"
+
+class ServerConnection;
 
 struct UserInfo {
     int id;
@@ -27,8 +26,8 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
-    explicit MainWindow(const QString &host, int port, const QString &nick, 
-                        const QString &password, QWidget *parent = nullptr);
+    // Забирает соединение, в котором уже прошёл вход
+    explicit MainWindow(ServerConnection *connection, const QString &nick, QWidget *parent = nullptr);
     ~MainWindow();
 
 private slots:
@@ -36,23 +35,10 @@ private slots:
     void onSearchRequested();
     void onSendMessageClicked();
     void onSendMessagePressed();
-    void onSocketReadyRead();
-    void onSocketDisconnected();
-    void onSocketError();
-    void reconnectTimerTimeout();
-    void onSocketConnected();
 
 private:
-    QString m_host;
-    int m_port;
     QString m_nick;
-    QString m_password;
-    
-    QSslSocket *m_socket;
-    bool m_tlsRejected = false;
-    bool m_authenticated = false;
-    QTimer *m_reconnectTimer;
-    QByteArray m_buffer;
+    ServerConnection *m_connection;
     
     DatabaseClient *m_database;
     
@@ -70,8 +56,6 @@ private:
     
     void setupUI();
     void applyStyles();
-    void connectToServer();
-    void sendAuthRequest(const QString &type);
     void requestOfflineMessages();
     void sendPendingMessage(const PendingMessage &pending);
     void resendPendingMessages();

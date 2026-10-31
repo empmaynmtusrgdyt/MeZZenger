@@ -1,6 +1,5 @@
 #include <QApplication>
 #include <QStyleFactory>
-#include <QDebug>
 #include "LoginWindow.h"
 #include "MainWindow.h"
 
@@ -16,23 +15,14 @@ int main(int argc, char *argv[]) {
     LoginWindow loginWindow;
     loginWindow.show();
     
-    QObject::connect(&loginWindow, &LoginWindow::loginSuccessful, [&]() {
-        qDebug() << "loginSuccessful signal received";
-        
-        QString host = loginWindow.getHost();
-        int port = loginWindow.getPort();
-        QString nick = loginWindow.getNick();
-        QString password = loginWindow.getPassword();
-        
-        qDebug() << "Creating MainWindow with host:" << host << "port:" << port << "nick:" << nick;
-        
-        MainWindow *mainWindow = new MainWindow(host, port, nick, password);
+    QObject::connect(&loginWindow, &LoginWindow::loginSuccessful, [&](ServerConnection *connection) {
+        MainWindow *mainWindow = new MainWindow(connection, loginWindow.getNick());
         mainWindow->show();
-        
+
         loginWindow.hide();
-        
+
         QObject::connect(mainWindow, &MainWindow::destroyed, &loginWindow, &QObject::deleteLater);
     });
-    
+
     return app.exec();
 }

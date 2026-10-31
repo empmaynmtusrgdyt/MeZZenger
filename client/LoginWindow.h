@@ -6,7 +6,9 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QLabel>
-#include <QJsonObject>
+#include <QPointer>
+
+class ServerConnection;
 
 class LoginWindow : public QMainWindow {
     Q_OBJECT
@@ -21,8 +23,8 @@ public:
     QString getPassword() const;
 
 signals:
-    void loginSuccessful();
-    void loginFailed(const QString &error);
+    // Соединение, в котором прошёл вход, передаётся главному окну
+    void loginSuccessful(ServerConnection *connection);
 
 private slots:
     void onLoginClicked();
@@ -40,13 +42,12 @@ private:
     
     QLabel *m_statusLabel;
     
-    bool m_isRegistering = false;
-    QString m_currentHost;
-    quint16 m_currentPort = 5555;
+    QPointer<ServerConnection> m_connection;
 
     void setupUI();
     void applyStyles();
-    void sendAuthRequest(const QString &type);
+    void startAuth(const QString &type);
+    void setBusy(bool busy);
 };
 
 #endif

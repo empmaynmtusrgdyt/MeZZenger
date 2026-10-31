@@ -13,9 +13,9 @@ namespace TlsTrust {
 
 QString fingerprint(const QSslCertificate &certificate);
 
-// Подключает обработку ошибок сертификата к сокету. onRejected вызывается,
-// если пользователь отказался доверять серверу.
-void attach(QSslSocket *socket, const QString &host, quint16 port, QWidget *dialogParent,
+// Подключает обработку ошибок сертификата к сокету. dialogParent вызывается при показе вопроса
+// (окно-владелец может смениться). onRejected вызывается, если пользователь отказался доверять серверу.
+void attach(QSslSocket *socket, const QString &host, quint16 port, std::function<QWidget *()> dialogParent,
             std::function<void()> onRejected = {});
 
 }

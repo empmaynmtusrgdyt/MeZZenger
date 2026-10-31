@@ -1,7 +1,8 @@
 #include "MainWindow.h"
 #include "Protocol.h"
-#include "TlsTrust.h"
+#include "ServerConnection.h"
 #include <QMessageBox>
+#include <QTimer>
 #include <QUuid>
 #include <QJsonDocument>
 #include <QDateTime>
@@ -9,15 +10,10 @@
 #include <QFont>
 #include <QDebug>
 
-MainWindow::MainWindow(const QString &host, int port, const QString &nick,
-                       const QString &password, QWidget *parent)
+MainWindow::MainWindow(ServerConnection *connection, const QString &nick, QWidget *parent)
     : QMainWindow(parent)
-    , m_host(host)
-    , m_port(port)
     , m_nick(nick)
-    , m_password(password)
-    , m_socket(new QSslSocket(this))
-    , m_reconnectTimer(new QTimer(this))
+    , m_connection(connection)
     , m_database(new DatabaseClient(this))
 {
     qDebug() << "MainWindow constructor called";
@@ -29,27 +25,22 @@ MainWindow::MainWindow(const QString &host, int port, const QString &nick,
     setupUI();
     applyStyles();
     
-    connect(m_socket, &QTcpSocket::readyRead, this, &MainWindow::onSocketReadyRead);
-    connect(m_socket, &QTcpSocket::disconnected, this, &MainWindow::onSocketDisconnected);
-    connect(m_socket, QOverload<QAbstractSocket::SocketError>::of(&QAbstractSocket::errorOccurred),
-            this, &MainWindow::onSocketError);
-    connect(m_socket, &QSslSocket::encrypted, this, &MainWindow::onSocketConnected);
-    TlsTrust::attach(m_socket, m_host, static_cast<quint16>(m_port), this, [this]() {
-        m_tlsRejected = true;
-        m_reconnectTimer->stop();
+    m_connection->setParent(this);
+    m_connection->setDialogParent(this);
+    connect(m_connection, &ServerConnection::messageReceived, this, &MainWindow::processServerMessage);
+    connect(m_connection, &ServerConnection::authRejected, this, [this](const QString &message) {
+        QMessageBox::warning(this, "Ошибка", message);
+        close();
+    });
+    connect(m_connection, &ServerConnection::tlsRejected, this, [this]() {
         QTimer::singleShot(0, this, &QWidget::close);
     });
-    
-    connect(m_reconnectTimer, &QTimer::timeout, this, &MainWindow::reconnectTimerTimeout);
-    m_reconnectTimer->setSingleShot(true);
-    
-    qDebug() << "Connecting to server" << host << port;
-    connectToServer();
+    m_connection->setAutoReconnect(true);
+    m_connection->startDispatch();
 }
 
 MainWindow::~MainWindow() {
-    m_socket->disconnectFromHost();
-    m_socket->close();
+    m_connection->close();
 }
 
 void MainWindow::setupUI() {
@@ -181,56 +172,9 @@ void MainWindow::applyStyles() {
     );
 }
 
-void MainWindow::connectToServer() {
-    m_socket->connectToHostEncrypted(m_host, m_port);
-}
-
-void MainWindow::sendAuthRequest(const QString &type) {
-    qDebug() << "Sending auth request:" << type << "nick:" << m_nick;
-    QJsonObject message;
-    message["type"] = type;
-    message[Protocol::PROTOCOL] = Protocol::Version;
-    message["nick"] = m_nick;
-    message["password"] = m_password;
-    
-    QByteArray data = serializeMessage(message);
-    m_socket->write(data);
-}
-
 void MainWindow::requestOfflineMessages() {
     qDebug() << "Requesting offline messages";
-    QJsonObject request;
-    request["type"] = "get_offline_messages";
-    QByteArray data = serializeMessage(request);
-    m_socket->write(data);
-}
-
-void MainWindow::onSocketReadyRead() {
-    qDebug() << "Data received from server";
-    m_buffer += m_socket->readAll();
-    
-    while (m_buffer.size() >= static_cast<int>(HeaderSize)) {
-        uint32_t messageLength = readHeader(m_buffer.left(HeaderSize));
-        
-        if (messageLength == 0 || messageLength > MaxMessageSize) {
-            m_buffer.clear();
-            return;
-        }
-        
-        if (m_buffer.size() < static_cast<int>(HeaderSize + messageLength)) {
-            break;
-        }
-        
-        QByteArray messageData = m_buffer.mid(HeaderSize, messageLength);
-        m_buffer = m_buffer.mid(HeaderSize + messageLength);
-        
-        QJsonObject message = deserializeMessage(messageData);
-        if (message.isEmpty()) {
-            continue;
-        }
-        
-        processServerMessage(message);
-    }
+    m_connection->send(ProtocolHelper::createGetOfflineMessages());
 }
 
 void MainWindow::processServerMessage(const QJsonObject &message) {
@@ -238,20 +182,6 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
     qDebug() << "Server message type:" << static_cast<int>(type);
     
     switch (type) {
-        case Protocol::MessageType::AuthResponse: {
-            bool success = ProtocolHelper::getBool(message, Protocol::SUCCESS);
-            QString msg = ProtocolHelper::getString(message, Protocol::MESSAGE);
-            qDebug() << "Auth response success:" << success << "msg:" << msg;
-            
-            if (success) {
-                m_authenticated = true;
-            } else {
-                QMessageBox::warning(this, "Ошибка", msg);
-                close();
-            }
-            break;
-        }
-        
         case Protocol::MessageType::UserList: {
             qDebug() << "Received user list";
             QJsonArray usersArray = message[Protocol::USERS].toArray();
@@ -457,11 +387,11 @@ void MainWindow::updateUserList(const QList<QJsonObject> &users) {
 }
 
 void MainWindow::sendPendingMessage(const PendingMessage &pending) {
-    if (!m_authenticated || pending.peerNick.isEmpty()) {
+    if (!m_connection->isAuthenticated() || pending.peerNick.isEmpty()) {
         return;
     }
     QJsonObject message = ProtocolHelper::createOutgoingMessage(pending.peerNick, pending.message, pending.clientMsgId);
-    m_socket->write(serializeMessage(message));
+    m_connection->send(message);
 }
 
 void MainWindow::resendPendingMessages() {
@@ -475,10 +405,10 @@ void MainWindow::resendPendingMessages() {
 }
 
 void MainWindow::sendDeliveryAck(const QList<int> &ids) {
-    if (!m_authenticated || ids.isEmpty()) {
+    if (!m_connection->isAuthenticated() || ids.isEmpty()) {
         return;
     }
-    m_socket->write(serializeMessage(ProtocolHelper::createDeliveryAck(ids)));
+    m_connection->send(ProtocolHelper::createDeliveryAck(ids));
 }
 
 void MainWindow::refreshSidebar() {
@@ -613,9 +543,7 @@ void MainWindow::onSearchRequested() {
     
     qDebug() << "Searching for user:" << nick;
     
-    QJsonObject searchRequest = ProtocolHelper::createSearchUserMessage(nick);
-    QByteArray data = serializeMessage(searchRequest);
-    m_socket->write(data);
+    m_connection->send(ProtocolHelper::createSearchUserMessage(nick));
 }
 
 void MainWindow::onSendMessagePressed() {
@@ -643,36 +571,5 @@ void MainWindow::onSendMessageClicked() {
 }
 
 void MainWindow::markMessagesReadOnServer(int userId) {
-    QJsonObject request = ProtocolHelper::createMarkMessagesRead(userId);
-    QByteArray data = serializeMessage(request);
-    m_socket->write(data);
-}
-
-void MainWindow::onSocketDisconnected() {
-    qDebug() << "Disconnected from server";
-    m_authenticated = false;
-    if (m_tlsRejected) {
-        return;
-    }
-    m_reconnectTimer->start(3000);
-}
-
-void MainWindow::onSocketError() {
-    qDebug() << "Socket error:" << m_socket->errorString();
-    // Неудачная попытка подключения не даёт сигнала disconnected, повторяем сами
-    if (!m_tlsRejected && m_socket->state() == QAbstractSocket::UnconnectedState) {
-        m_reconnectTimer->start(3000);
-    }
-}
-
-void MainWindow::reconnectTimerTimeout() {
-    qDebug() << "Reconnect timeout, attempting to reconnect";
-    if (m_socket->state() == QAbstractSocket::UnconnectedState) {
-        connectToServer();
-    }
-}
-
-void MainWindow::onSocketConnected() {
-    qDebug() << "Socket connected, sending login request for" << m_nick;
-    sendAuthRequest("login");
+    m_connection->send(ProtocolHelper::createMarkMessagesRead(userId));
 }

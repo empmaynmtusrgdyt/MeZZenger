@@ -97,6 +97,22 @@ class ClientGuiTests(ServerTestCase):
         self.assertEqual(len(run.client_rows("SELECT 1 FROM messages WHERE message = 'while away'")), 1)
         self.assertEqual(self.server.scalar("SELECT delivered FROM messages WHERE message = 'while away'"), 1)
 
+    def test_login_uses_a_single_connection(self):
+        self.register("alice", "pass1234")
+        before = self.server.log().count('"login"')
+        self.run_client("alice", duration=2500).finish()
+        self.assertEqual(self.server.log().count('"login"') - before, 1)
+
+    def test_client_reconnects_after_server_restart(self):
+        self.register("alice", "pass1234")
+        run = self.run_client("alice", duration=9000)
+        self.assertIsNotNone(run.wait_for("login-successful"))
+        before = self.server.log().count('"login"')
+        self.server.restart()
+        run.finish()
+        self.assertGreater(self.server.log().count('"login"'), before, run.events())
+        self.assertEqual(run.end_state()["main_visible"], "1")
+
 
 if __name__ == "__main__":
     unittest.main()

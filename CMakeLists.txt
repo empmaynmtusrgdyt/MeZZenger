@@ -49,8 +49,8 @@ set(CLIENT_SOURCES
     client/LoginWindow.h
     client/MainWindow.cpp
     client/MainWindow.h
-    client/NetworkManager.cpp
-    client/NetworkManager.h
+    client/ServerConnection.cpp
+    client/ServerConnection.h
     client/DatabaseClient.cpp
     client/DatabaseClient.h
     client/TlsTrust.cpp

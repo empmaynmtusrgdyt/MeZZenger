@@ -11,7 +11,7 @@ QString fingerprint(const QSslCertificate &certificate) {
         QCryptographicHash::hash(certificate.toDer(), QCryptographicHash::Sha256).toHex(':').toUpper());
 }
 
-void attach(QSslSocket *socket, const QString &host, quint16 port, QWidget *dialogParent,
+void attach(QSslSocket *socket, const QString &host, quint16 port, std::function<QWidget *()> dialogParent,
             std::function<void()> onRejected) {
     // ignoreSslErrors() запоминается сокетом: без сброса при переподключении
     // sslErrors не приходит и отпечаток больше не сверяется.
@@ -57,7 +57,7 @@ void attach(QSslSocket *socket, const QString &host, quint16 port, QWidget *dial
             }
 
             QMessageBox box(icon, "Сертификат сервера", question,
-                            QMessageBox::Yes | QMessageBox::No, dialogParent);
+                            QMessageBox::Yes | QMessageBox::No, dialogParent ? dialogParent() : nullptr);
             box.setDefaultButton(QMessageBox::No);
             if (box.exec() == QMessageBox::Yes) {
                 settings.setValue(settingsKey, current);

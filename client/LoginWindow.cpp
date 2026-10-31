@@ -4,9 +4,7 @@
 #include <QHBoxLayout>
 #include <QFormLayout>
 #include <QMessageBox>
-#include <QSslSocket>
-#include "TlsTrust.h"
-#include <QTimer>
+#include "ServerConnection.h"
 #include <QDebug>
 
 LoginWindow::LoginWindow(QWidget *parent)
@@ -114,9 +112,7 @@ void LoginWindow::onLoginClicked() {
         QMessageBox::warning(this, "Ошибка", "Введите ник и пароль");
         return;
     }
-    m_currentHost = getHost();
-    m_currentPort = static_cast<quint16>(getPort());
-    sendAuthRequest("login");
+    startAuth("login");
 }
 
 void LoginWindow::onRegisterClicked() {
@@ -138,107 +134,38 @@ void LoginWindow::onRegisterClicked() {
         QMessageBox::warning(this, "Ошибка", "Для регистрации нужен код приглашения. Его выдаёт администратор сервера.");
         return;
     }
-    m_currentHost = getHost();
-    m_currentPort = static_cast<quint16>(getPort());
-    sendAuthRequest("register");
+    startAuth("register");
 }
 
-void LoginWindow::sendAuthRequest(const QString &type) {
-    qDebug() << "Auth request to" << m_currentHost << m_currentPort << type << getNick();
+void LoginWindow::setBusy(bool busy) {
+    m_statusLabel->setText(busy ? "Подключение..." : QString());
+    m_loginButton->setEnabled(!busy);
+    m_registerButton->setEnabled(!busy);
+}
 
-    m_statusLabel->setText("Подключение...");
-    m_loginButton->setEnabled(false);
-    m_registerButton->setEnabled(false);
+void LoginWindow::startAuth(const QString &type) {
+    qDebug() << "Auth request to" << getHost() << getPort() << type << getNick();
+    setBusy(true);
 
-    QSslSocket *socket = new QSslSocket(this);
-    QByteArray buffer;
-    QTimer *timeoutTimer = new QTimer(this);
-    timeoutTimer->setSingleShot(true);
-
-    QJsonObject msg;
-    msg["type"] = type;
-    msg[Protocol::PROTOCOL] = Protocol::Version;
-    msg["nick"] = getNick();
-    msg["password"] = getPassword();
-    if (type == "register") {
-        msg[Protocol::INVITE] = m_inviteEdit->text().trimmed();
+    if (m_connection) {
+        m_connection->deleteLater();
     }
-    QByteArray data = serializeMessage(msg);
+    auto *connection = new ServerConnection(this);
+    m_connection = connection;
+    connection->setDialogParent(this);
 
-    // Пока пользователь читает отпечаток сертификата, таймаут не должен сработать
-    connect(socket, &QSslSocket::sslErrors, timeoutTimer, &QTimer::stop);
-    TlsTrust::attach(socket, m_currentHost, m_currentPort, this);
-
-    connect(socket, &QSslSocket::encrypted, [=]() {
-        timeoutTimer->stop();
-        socket->write(data);
-        qDebug() << "Auth data sent";
+    connect(connection, &ServerConnection::authenticated, this, [this, connection]() {
+        emit loginSuccessful(connection);
+    });
+    connect(connection, &ServerConnection::authRejected, this, [this](const QString &message) {
+        setBusy(false);
+        QMessageBox::warning(this, "Ошибка", message);
+    });
+    connect(connection, &ServerConnection::failed, this, [this](const QString &error) {
+        setBusy(false);
+        QMessageBox::warning(this, "Ошибка", error);
     });
 
-    connect(socket, &QSslSocket::readyRead, [=]() mutable {
-        buffer.append(socket->readAll());
-
-        while (buffer.size() >= (int)HeaderSize) {
-            uint32_t len = readHeader(buffer.left(HeaderSize));
-            if (len == 0 || len > MaxMessageSize) {
-                qDebug() << "Invalid message length";
-                socket->close();
-                return;
-            }
-            if (buffer.size() < (int)(HeaderSize + len))
-                break;
-
-            QByteArray jsonData = buffer.mid(HeaderSize, len);
-            buffer = buffer.mid(HeaderSize + len);
-
-            QJsonObject resp = deserializeMessage(jsonData);
-            if (resp.isEmpty()) {
-                qDebug() << "Failed to parse JSON";
-                continue;
-            }
-
-            Protocol::MessageType msgType = ProtocolHelper::parseMessageType(resp);
-            qDebug() << "Received message type:" << (int)msgType;
-
-            if (msgType == Protocol::MessageType::AuthResponse) {
-                bool ok = ProtocolHelper::getBool(resp, Protocol::SUCCESS);
-                QString errMsg = ProtocolHelper::getString(resp, Protocol::MESSAGE);
-                qDebug() << "Auth response" << ok << errMsg;
-
-                if (ok) {
-                    emit loginSuccessful();
-                } else {
-                    m_statusLabel->clear();
-                    m_loginButton->setEnabled(true);
-                    m_registerButton->setEnabled(true);
-                    QMessageBox::warning(this, "Ошибка", errMsg);
-                    socket->close();
-                }
-                return;
-            }
-        }
-    });
-
-    connect(socket, &QTcpSocket::errorOccurred, [=](QAbstractSocket::SocketError) {
-        qDebug() << "Socket error:" << socket->errorString();
-        timeoutTimer->stop();
-        m_statusLabel->clear();
-        m_loginButton->setEnabled(true);
-        m_registerButton->setEnabled(true);
-        QMessageBox::warning(this, "Ошибка", "Ошибка соединения: " + socket->errorString());
-        socket->close();
-    });
-
-    connect(timeoutTimer, &QTimer::timeout, [=]() {
-        qDebug() << "Connection timeout";
-        socket->abort();
-        m_statusLabel->clear();
-        m_loginButton->setEnabled(true);
-        m_registerButton->setEnabled(true);
-        QMessageBox::warning(this, "Ошибка", "Превышено время подключения");
-        socket->close();
-    });
-
-    timeoutTimer->start(5000);
-    socket->connectToHostEncrypted(m_currentHost, m_currentPort);
+    connection->open(getHost(), static_cast<quint16>(getPort()), getNick(), getPassword(),
+                     type == "register" ? m_inviteEdit->text().trimmed() : QString());
 }
