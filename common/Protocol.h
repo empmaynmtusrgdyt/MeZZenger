@@ -26,7 +26,14 @@ namespace Protocol {
         DeliveryAck,
         Presence,
         ChangePassword,
-        ChangePasswordResponse
+        ChangePasswordResponse,
+        FileUploadRequest,
+        FileDownloadRequest,
+        FileTicket,
+        FilePut,
+        FileGet,
+        FileInfo,
+        FileResult
     };
 
     inline const QString TYPE = "type";
@@ -48,6 +55,12 @@ namespace Protocol {
     inline const QString ONLINE = "online";
     inline const QString OLD_PASSWORD = "old_password";
     inline const QString NEW_PASSWORD = "new_password";
+    inline const QString FILE_ID = "file_id";
+    inline const QString FILE_NAME = "file_name";
+    inline const QString FILE_SIZE = "file_size";
+    inline const QString TOKEN = "token";
+    inline const QString REF = "ref";
+    inline const QString SIZE = "size";
 
     // Версия протокола. Увеличивайте при любом несовместимом изменении (смена смысла полей,
     // новые обязательные поля или сообщения). Добавление необязательных полей версию не меняет.
@@ -60,6 +73,8 @@ namespace Protocol {
     inline constexpr int MinPasswordLength = 4;
     inline constexpr int MaxPasswordLength = 128;
     inline constexpr int MaxMessageLength = 4000;
+    inline constexpr qint64 MaxFileSize = 50LL * 1024 * 1024;
+    inline constexpr int MaxFileNameLength = 200;
 }
 
 class ProtocolHelper {
@@ -113,12 +128,81 @@ public:
     }
 
     // Сообщение от клиента серверу. client_msg_id нужен серверу, чтобы отбросить повторную отправку.
-    static QJsonObject createOutgoingMessage(const QString &toNick, const QString &text, const QString &clientMsgId) {
+    // fileId (если не пуст) ссылается на файл, заранее загруженный отдельным соединением.
+    // Имя и размер сервер берёт из своей записи о файле, присланным значениям не верит.
+    static QJsonObject createOutgoingMessage(const QString &toNick, const QString &text, const QString &clientMsgId,
+                                             const QString &fileId = QString()) {
         QJsonObject obj;
         obj[Protocol::TYPE] = "message";
         obj[Protocol::TO_NICK] = toNick;
         obj[Protocol::TEXT] = text;
         obj[Protocol::CLIENT_MSG_ID] = clientMsgId;
+        if (!fileId.isEmpty()) {
+            obj[Protocol::FILE_ID] = fileId;
+        }
+        return obj;
+    }
+
+    // Загрузка: клиент просит разрешение (ref возвращается в file_ticket); скачивание: по file_id.
+    static QJsonObject createFileUploadRequest(const QString &name, qint64 size, const QString &ref) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "file_upload_request";
+        obj[Protocol::FILE_NAME] = name;
+        obj[Protocol::FILE_SIZE] = size;
+        obj[Protocol::REF] = ref;
+        return obj;
+    }
+
+    static QJsonObject createFileDownloadRequest(const QString &fileId) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "file_download_request";
+        obj[Protocol::FILE_ID] = fileId;
+        return obj;
+    }
+
+    // Сервер -> клиенту: одноразовый токен для отдельного соединения передачи файла.
+    static QJsonObject createFileTicket(bool success, const QString &message, const QString &ref = QString(),
+                                        const QString &fileId = QString(), const QString &token = QString(),
+                                        const QString &name = QString(), qint64 size = 0) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "file_ticket";
+        obj[Protocol::SUCCESS] = success;
+        obj[Protocol::MESSAGE] = message;
+        obj[Protocol::REF] = ref;
+        obj[Protocol::FILE_ID] = fileId;
+        obj[Protocol::TOKEN] = token;
+        obj[Protocol::FILE_NAME] = name;
+        obj[Protocol::FILE_SIZE] = size;
+        return obj;
+    }
+
+    // Первый кадр отдельного соединения: после него идут size сырых байт (put) или сервер присылает file_info и байты (get).
+    static QJsonObject createFilePut(const QString &token) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "file_put";
+        obj[Protocol::TOKEN] = token;
+        return obj;
+    }
+
+    static QJsonObject createFileGet(const QString &token) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "file_get";
+        obj[Protocol::TOKEN] = token;
+        return obj;
+    }
+
+    static QJsonObject createFileInfo(qint64 size) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "file_info";
+        obj[Protocol::SIZE] = size;
+        return obj;
+    }
+
+    static QJsonObject createFileResult(bool success, const QString &message = QString()) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "file_result";
+        obj[Protocol::SUCCESS] = success;
+        obj[Protocol::MESSAGE] = message;
         return obj;
     }
 
@@ -143,7 +227,8 @@ public:
         return obj;
     }
 
-    static QJsonObject createMessageWithTimestamp(const QString &fromNick, const QString &text, const QString &timestamp, int fromId = 0, int id = 0) {
+    static QJsonObject createMessageWithTimestamp(const QString &fromNick, const QString &text, const QString &timestamp, int fromId = 0, int id = 0,
+                                                  const QString &fileId = QString(), const QString &fileName = QString(), qint64 fileSize = 0) {
         QJsonObject obj;
         obj[Protocol::TYPE] = "message";
         if (id > 0) {
@@ -153,6 +238,11 @@ public:
         obj[Protocol::FROM_NICK] = fromNick;
         obj[Protocol::TEXT] = text;
         obj[Protocol::TIMESTAMP] = timestamp;
+        if (!fileId.isEmpty()) {
+            obj[Protocol::FILE_ID] = fileId;
+            obj[Protocol::FILE_NAME] = fileName;
+            obj[Protocol::FILE_SIZE] = fileSize;
+        }
         return obj;
     }
 
@@ -251,6 +341,13 @@ public:
         if (type == "presence") return Protocol::MessageType::Presence;
         if (type == "change_password") return Protocol::MessageType::ChangePassword;
         if (type == "change_password_response") return Protocol::MessageType::ChangePasswordResponse;
+        if (type == "file_upload_request") return Protocol::MessageType::FileUploadRequest;
+        if (type == "file_download_request") return Protocol::MessageType::FileDownloadRequest;
+        if (type == "file_ticket") return Protocol::MessageType::FileTicket;
+        if (type == "file_put") return Protocol::MessageType::FilePut;
+        if (type == "file_get") return Protocol::MessageType::FileGet;
+        if (type == "file_info") return Protocol::MessageType::FileInfo;
+        if (type == "file_result") return Protocol::MessageType::FileResult;
         return Protocol::MessageType::Error;
     }
 

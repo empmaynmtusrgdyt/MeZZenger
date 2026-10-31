@@ -37,6 +37,8 @@ public:
     void updatePassword(const QString &password) { m_password = password; }
 
     bool isAuthenticated() const { return m_authenticated; }
+    QString host() const { return m_host; }
+    quint16 port() const { return m_port; }
     void send(const QJsonObject &message);
 
 signals:

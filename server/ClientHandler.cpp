@@ -2,6 +2,8 @@
 #include "DatabaseServer.h"
 #include "Protocol.h"
 #include "ServerLimits.h"
+#include "FileStore.h"
+#include "FileSession.h"
 #include <QDebug>
 #include <QJsonDocument>
 #include <QChar>
@@ -27,11 +29,12 @@ QString nickProblem(const QString &nick) {
 }
 
 ClientHandler::ClientHandler(QTcpSocket *socket, DatabaseServer *db, RateLimiter *authLimiter,
-                             QObject *parent)
+                             FileStore *files, QObject *parent)
     : QObject(parent)
     , m_socket(socket)
     , m_database(db)
     , m_authLimiter(authLimiter)
+    , m_files(files)
     , m_ipKey(ipKey(socket->peerAddress()))
     , m_bucket(Limits::MessageBurst, Limits::MessagesPerSecond)
     , m_authTimer(new QTimer(this))
@@ -76,11 +79,21 @@ void ClientHandler::sendMessage(const QJsonObject &message) {
     }
 
     m_socket->flush();
-    qDebug() << "Отправлено сообщение клиенту" << m_nick << ":" << message;
+    QJsonObject loggable = message;
+    if (loggable.contains(Protocol::TOKEN)) {
+        loggable[Protocol::TOKEN] = "***";
+    }
+    qDebug() << "Отправлено сообщение клиенту" << m_nick << ":" << loggable;
 }
 
 void ClientHandler::readMessages() {
     m_buffer += m_socket->readAll();
+
+    if (m_fileSession) {
+        m_fileSession->feed(m_buffer);
+        m_buffer.clear();
+        return;
+    }
 
     while (m_buffer.size() >= static_cast<int>(HeaderSize)) {
         uint32_t messageLength = readHeader(m_buffer.left(HeaderSize));
@@ -107,13 +120,20 @@ void ClientHandler::readMessages() {
 
         // Пароль и код приглашения не должны попадать в журнал
         QJsonObject loggable = message;
-        for (const QString &secret : {Protocol::PASSWORD, Protocol::INVITE, Protocol::OLD_PASSWORD, Protocol::NEW_PASSWORD}) {
+        for (const QString &secret : {Protocol::PASSWORD, Protocol::INVITE, Protocol::OLD_PASSWORD, Protocol::NEW_PASSWORD, Protocol::TOKEN}) {
             if (loggable.contains(secret)) {
                 loggable[secret] = "***";
             }
         }
         qDebug() << "Получено сообщение от клиента:" << loggable;
         processMessage(message);
+
+        // После заголовка передачи файла идут сырые байты, а не кадры
+        if (m_fileSession) {
+            m_fileSession->feed(m_buffer);
+            m_buffer.clear();
+            return;
+        }
     }
 }
 
@@ -158,6 +178,22 @@ void ClientHandler::processMessage(const QJsonObject &message) {
         case Protocol::MessageType::DeliveryAck:
             if (m_authenticated) {
                 handleDeliveryAck(message);
+            }
+            break;
+        case Protocol::MessageType::FilePut:
+            startFileSession(message, true);
+            break;
+        case Protocol::MessageType::FileGet:
+            startFileSession(message, false);
+            break;
+        case Protocol::MessageType::FileUploadRequest:
+            if (m_authenticated) {
+                handleFileUploadRequest(message);
+            }
+            break;
+        case Protocol::MessageType::FileDownloadRequest:
+            if (m_authenticated) {
+                handleFileDownloadRequest(message);
             }
             break;
         case Protocol::MessageType::ChangePassword:
@@ -285,7 +321,11 @@ void ClientHandler::handleMessage(const QJsonObject &message) {
     QString toNick = ProtocolHelper::getString(message, Protocol::TO_NICK);
     QString text = ProtocolHelper::getString(message, Protocol::TEXT);
 
-    if (toNick.isEmpty() || text.isEmpty() || toNick.size() > Protocol::MaxNickLength) return;
+    const QString fileId = ProtocolHelper::getString(message, Protocol::FILE_ID);
+
+    // Подпись к файлу может быть пустой
+    if (toNick.isEmpty() || (text.isEmpty() && fileId.isEmpty()) || toNick.size() > Protocol::MaxNickLength
+        || fileId.size() > 64) return;
 
     if (text.size() > Protocol::MaxMessageLength) {
         sendMessage(ProtocolHelper::createErrorMessage(
@@ -300,7 +340,7 @@ void ClientHandler::handleMessage(const QJsonObject &message) {
     if (clientMsgId.size() > Limits::MaxClientMsgIdLength) return;
 
     bool duplicate = false;
-    int messageId = m_database->saveMessage(m_userId, toUserId, text, clientMsgId, &duplicate);
+    int messageId = m_database->saveMessage(m_userId, toUserId, text, clientMsgId, &duplicate, fileId);
     if (messageId <= 0) {
         // Без подтверждения клиент оставит сообщение в очереди и повторит отправку
         return;
@@ -314,7 +354,7 @@ void ClientHandler::handleMessage(const QJsonObject &message) {
         qDebug() << "Повторная отправка сообщения" << clientMsgId << "- уже сохранено как" << messageId;
         return;
     }
-    forwardMessage(m_userId, toUserId, messageId, text);
+    forwardMessage(m_userId, toUserId, messageId, text, fileId);
 }
 
 void ClientHandler::handleDeliveryAck(const QJsonObject &message) {
@@ -424,6 +464,52 @@ void ClientHandler::handleChangePassword(const QJsonObject &message) {
     sendMessage(ProtocolHelper::createChangePasswordResponse(true, "Пароль изменён"));
 }
 
+void ClientHandler::handleFileUploadRequest(const QJsonObject &message) {
+    const QString ref = ProtocolHelper::getString(message, Protocol::REF);
+    const QString name = ProtocolHelper::getString(message, Protocol::FILE_NAME);
+    const qint64 size = static_cast<qint64>(message[Protocol::FILE_SIZE].toDouble());
+
+    QString error, fileId;
+    const QString token = m_files->issueUpload(m_userId, name, size, &fileId, &error);
+    if (token.isEmpty()) {
+        sendMessage(ProtocolHelper::createFileTicket(false, error, ref));
+        return;
+    }
+    sendMessage(ProtocolHelper::createFileTicket(true, QString(), ref, fileId, token, FileStore::sanitizeName(name), size));
+}
+
+void ClientHandler::handleFileDownloadRequest(const QJsonObject &message) {
+    const QString fileId = ProtocolHelper::getString(message, Protocol::FILE_ID);
+
+    QString error;
+    const QString token = m_files->issueDownload(m_userId, fileId, &error);
+    if (token.isEmpty()) {
+        sendMessage(ProtocolHelper::createFileTicket(false, error, QString(), fileId));
+        return;
+    }
+    const QJsonObject info = m_database->fileInfo(fileId);
+    sendMessage(ProtocolHelper::createFileTicket(true, QString(), QString(), fileId, token,
+                                                 info["name"].toString(), static_cast<qint64>(info["size"].toDouble())));
+}
+
+// Отдельное соединение передачи файла: личность подтверждает одноразовый токен, входить не нужно
+void ClientHandler::startFileSession(const QJsonObject &message, bool upload) {
+    if (m_authenticated || m_fileSession) return;
+
+    FileStore::Ticket ticket;
+    const QString token = ProtocolHelper::getString(message, Protocol::TOKEN);
+    if (m_authLimiter->retryAfterMs(m_ipKey) > 0 || !m_files->take(token, &ticket) || ticket.upload != upload) {
+        recordAuthFailure();
+        sendMessage(ProtocolHelper::createFileResult(false, "Недействительное разрешение на передачу файла"));
+        m_socket->disconnectFromHost();
+        return;
+    }
+
+    m_authTimer->stop();
+    m_fileSession = new FileSession(m_socket, m_files, m_database, ticket, this);
+    m_fileSession->start();
+}
+
 void ClientHandler::handleGetOfflineMessages() {
     QList<QJsonObject> rawMessages = m_database->getUndeliveredMessages(m_userId);
     qDebug() << "Отправка offline-сообщений для" << m_nick << ", количество:" << rawMessages.size();
@@ -441,6 +527,11 @@ void ClientHandler::handleGetOfflineMessages() {
         resolved["from_nick"] = fromNick;
         resolved["message"] = msg["message"];
         resolved["timestamp"] = msg["timestamp"];
+        if (msg.contains(Protocol::FILE_ID)) {
+            resolved[Protocol::FILE_ID] = msg[Protocol::FILE_ID];
+            resolved[Protocol::FILE_NAME] = msg[Protocol::FILE_NAME];
+            resolved[Protocol::FILE_SIZE] = msg[Protocol::FILE_SIZE];
+        }
         messages.append(resolved);
     }
 
@@ -484,9 +575,17 @@ void ClientHandler::handleMarkMessagesRead(const QJsonObject &message) {
     }
 }
 
-void ClientHandler::forwardMessage(int fromUserId, int toUserId, int messageId, const QString &text) {
+void ClientHandler::forwardMessage(int fromUserId, int toUserId, int messageId, const QString &text, const QString &fileId) {
+    QString fileName;
+    qint64 fileSize = 0;
+    if (!fileId.isEmpty()) {
+        const QJsonObject info = m_database->fileInfo(fileId);
+        fileName = info["name"].toString();
+        fileSize = static_cast<qint64>(info["size"].toDouble());
+    }
     QJsonObject message = ProtocolHelper::createMessageWithTimestamp(
-        m_nick, text, QDateTime::currentDateTime().toString(Qt::ISODate), fromUserId, messageId
+        m_nick, text, QDateTime::currentDateTime().toString(Qt::ISODate), fromUserId, messageId,
+        fileId, fileName, fileSize
     );
     emit messageReady(toUserId, messageId, message);
 }

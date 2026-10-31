@@ -1,4 +1,5 @@
 #include "DatabaseServer.h"
+#include <QUuid>
 #include <QDebug>
 #include <QFile>
 #include <QRandomGenerator>
@@ -156,6 +157,37 @@ bool DatabaseServer::initialize(const QString &dbPath) {
             return false;
         }
     }
+
+    for (const char *column : {"file_id TEXT", "file_name TEXT", "file_size INTEGER"}) {
+        const QString name = QString::fromLatin1(column).section(' ', 0, 0);
+        query.exec("PRAGMA table_info(messages)");
+        bool present = false;
+        while (query.next()) {
+            if (query.value(1).toString() == name) {
+                present = true;
+                break;
+            }
+        }
+        if (!present && !query.exec(QString("ALTER TABLE messages ADD COLUMN %1").arg(QString::fromLatin1(column)))) {
+            qCritical() << "Не удалось добавить колонку" << name << ":" << query.lastError().text();
+            return false;
+        }
+    }
+
+    if (!query.exec(
+        "CREATE TABLE IF NOT EXISTS files ("
+        "id TEXT PRIMARY KEY, "
+        "owner_id INTEGER NOT NULL, "
+        "name TEXT NOT NULL, "
+        "size INTEGER NOT NULL, "
+        "complete INTEGER NOT NULL DEFAULT 0, "
+        "created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+    )) {
+        qCritical() << "Ошибка создания таблицы files:" << query.lastError().text();
+        return false;
+    }
+
+    query.exec("CREATE INDEX IF NOT EXISTS idx_messages_file ON messages(file_id)");
 
     if (!query.exec(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_msg "
@@ -447,7 +479,7 @@ QJsonObject DatabaseServer::searchUser(const QString &nick) {
 }
 
 int DatabaseServer::saveMessage(int fromUserId, int toUserId, const QString &message,
-                                const QString &clientMsgId, bool *duplicate) {
+                                const QString &clientMsgId, bool *duplicate, const QString &fileId) {
     if (duplicate) {
         *duplicate = false;
     }
@@ -468,13 +500,28 @@ int DatabaseServer::saveMessage(int fromUserId, int toUserId, const QString &mes
         }
     }
 
+    // Имя и размер берутся из записи о файле, а не из сообщения клиента
+    QString fileName;
+    qint64 fileSize = 0;
+    if (!fileId.isEmpty()) {
+        const QJsonObject info = fileInfo(fileId);
+        if (info.isEmpty() || info["owner_id"].toInt() != fromUserId || !info["complete"].toBool()) {
+            return -1;
+        }
+        fileName = info["name"].toString();
+        fileSize = static_cast<qint64>(info["size"].toDouble());
+    }
+
     query.prepare(
-        "INSERT INTO messages (from_user_id, to_user_id, message, delivered, client_msg_id) "
-        "VALUES (:from, :to, :msg, 0, :cid)"
+        "INSERT INTO messages (from_user_id, to_user_id, message, delivered, client_msg_id, file_id, file_name, file_size) "
+        "VALUES (:from, :to, :msg, 0, :cid, :fid, :fname, :fsize)"
     );
     query.bindValue(":from", fromUserId);
     query.bindValue(":to", toUserId);
     query.bindValue(":msg", message);
+    query.bindValue(":fid", fileId.isEmpty() ? QVariant(QMetaType(QMetaType::QString)) : QVariant(fileId));
+    query.bindValue(":fname", fileId.isEmpty() ? QVariant(QMetaType(QMetaType::QString)) : QVariant(fileName));
+    query.bindValue(":fsize", fileId.isEmpty() ? QVariant(QMetaType(QMetaType::LongLong)) : QVariant(fileSize));
     query.bindValue(":cid", clientMsgId.isEmpty() ? QVariant(QMetaType(QMetaType::QString)) : QVariant(clientMsgId));
 
     if (!query.exec()) {
@@ -494,7 +541,7 @@ QList<QJsonObject> DatabaseServer::getUndeliveredMessages(int toUserId) {
 
     QSqlQuery query = createQuery();
     query.prepare(
-        "SELECT id, from_user_id, message, timestamp FROM messages "
+        "SELECT id, from_user_id, message, timestamp, file_id, file_name, file_size FROM messages "
         "WHERE to_user_id = :to AND delivered = 0 "
         "ORDER BY id ASC "
         "LIMIT 100"
@@ -512,6 +559,11 @@ QList<QJsonObject> DatabaseServer::getUndeliveredMessages(int toUserId) {
         msg["from_user_id"] = query.value(1).toInt();
         msg["message"] = query.value(2).toString();
         msg["timestamp"] = query.value(3).toString();
+        if (!query.value(4).isNull()) {
+            msg[Protocol::FILE_ID] = query.value(4).toString();
+            msg[Protocol::FILE_NAME] = query.value(5).toString();
+            msg[Protocol::FILE_SIZE] = query.value(6).toLongLong();
+        }
         messages.append(msg);
     }
 
@@ -564,4 +616,79 @@ bool DatabaseServer::markMessagesAsRead(int fromUserId, int toUserId) {
 
     qDebug() << "Сообщения от" << fromUserId << "к" << toUserId << "отмечены как прочитанные, затронуто:" << query.numRowsAffected();
     return true;
+}
+
+QString DatabaseServer::createFile(int ownerId, const QString &name, qint64 size) {
+    const QString id = QUuid::createUuid().toString(QUuid::Id128);
+    QSqlQuery query = createQuery();
+    query.prepare("INSERT INTO files (id, owner_id, name, size) VALUES (:id, :owner, :name, :size)");
+    query.bindValue(":id", id);
+    query.bindValue(":owner", ownerId);
+    query.bindValue(":name", name);
+    query.bindValue(":size", size);
+    if (!query.exec()) {
+        qWarning() << "Ошибка создания записи о файле:" << query.lastError().text();
+        return QString();
+    }
+    return id;
+}
+
+bool DatabaseServer::completeFile(const QString &fileId) {
+    QSqlQuery query = createQuery();
+    query.prepare("UPDATE files SET complete = 1 WHERE id = :id");
+    query.bindValue(":id", fileId);
+    return query.exec() && query.numRowsAffected() == 1;
+}
+
+QJsonObject DatabaseServer::fileInfo(const QString &fileId) {
+    QJsonObject info;
+    QSqlQuery query = createQuery();
+    query.prepare("SELECT owner_id, name, size, complete FROM files WHERE id = :id");
+    query.bindValue(":id", fileId);
+    if (query.exec() && query.next()) {
+        info["owner_id"] = query.value(0).toInt();
+        info["name"] = query.value(1).toString();
+        info["size"] = static_cast<double>(query.value(2).toLongLong());
+        info["complete"] = query.value(3).toInt() == 1;
+    }
+    return info;
+}
+
+qint64 DatabaseServer::storedBytes(int ownerId) {
+    QSqlQuery query = createQuery();
+    query.prepare("SELECT COALESCE(SUM(size), 0) FROM files WHERE owner_id = :owner");
+    query.bindValue(":owner", ownerId);
+    return query.exec() && query.next() ? query.value(0).toLongLong() : 0;
+}
+
+bool DatabaseServer::canDownloadFile(int userId, const QString &fileId) {
+    QSqlQuery query = createQuery();
+    query.prepare(
+        "SELECT 1 FROM messages m JOIN files f ON f.id = m.file_id "
+        "WHERE m.file_id = :id AND f.complete = 1 AND (m.from_user_id = :user OR m.to_user_id = :user) LIMIT 1"
+    );
+    query.bindValue(":id", fileId);
+    query.bindValue(":user", userId);
+    return query.exec() && query.next();
+}
+
+bool DatabaseServer::deleteFile(const QString &fileId) {
+    QSqlQuery query = createQuery();
+    query.prepare("DELETE FROM files WHERE id = :id");
+    query.bindValue(":id", fileId);
+    return query.exec();
+}
+
+QStringList DatabaseServer::staleFileIds() {
+    QStringList ids;
+    QSqlQuery query = createQuery();
+    if (query.exec(
+            "SELECT id FROM files WHERE "
+            "(complete = 0 AND created_at < datetime('now', '-1 hour')) OR "
+            "(created_at < datetime('now', '-1 day') AND id NOT IN (SELECT file_id FROM messages WHERE file_id IS NOT NULL))")) {
+        while (query.next()) {
+            ids << query.value(0).toString();
+        }
+    }
+    return ids;
 }

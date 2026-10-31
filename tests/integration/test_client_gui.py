@@ -2,6 +2,7 @@
 import time
 import unittest
 
+import support
 from support import HarnessRun, ServerTestCase, auth
 
 
@@ -155,6 +156,47 @@ class ClientGuiTests(ServerTestCase):
         bob.send({"type": "message", "to_nick": "alice", "text": "ping", "client_msg_id": "t1"})
         run.finish()
         self.assertEqual(run.of("wintitle"), ["(1) MeZZenger - alice"], run.events())
+
+    def test_client_sends_a_file(self):
+        import os, tempfile
+        self.register("alice", "pass1234")
+        bob = self.user("bob", "pass1234")
+        directory = tempfile.mkdtemp(prefix="mezzenger-files-")
+        self.addCleanup(__import__("shutil").rmtree, directory, True)
+        path = os.path.join(directory, "report.bin")
+        data = os.urandom(700_000)
+        with open(path, "wb") as f:
+            f.write(data)
+
+        run = self.run_client("alice", script=f"1500:search:bob,2500:attach:{path},6000:dump", duration=7000).finish()
+        got = bob.recv_type("message", 3)
+        self.assertEqual(len(got), 1, run.events())
+        self.assertEqual((got[0]["file_name"], got[0]["file_size"]), ("report.bin", len(data)))
+        self.assertEqual(support.download_file(self.server, bob, got[0]["file_id"])[1], data)
+        rows = run.client_rows("SELECT status, file_name, file_size FROM messages WHERE file_id IS NOT NULL")
+        self.assertEqual(rows, [(1, "report.bin", len(data))])
+        self.assertIn("report.bin", run.of("view")[-1])
+
+    def test_client_downloads_a_file(self):
+        import os, tempfile
+        alice = self.user("alice", "pass1234")
+        self.register("bob", "pass1234")
+        data = os.urandom(400_000)
+        ticket, result = support.upload_file(self.server, alice, "pic.bin", data)
+        self.assertTrue(result["success"])
+        support.send_file_message(alice, "bob", ticket["file_id"], "c1", "вот")
+        support.sync(alice)
+
+        target = tempfile.mkdtemp(prefix="mezzenger-dl-")
+        self.addCleanup(__import__("shutil").rmtree, target, True)
+        run = self.run_client("bob", script=f"1500:search:alice,3000:download:{target},6000:dump", duration=7000).finish()
+        saved = os.path.join(target, ticket["file_id"])
+        self.assertTrue(os.path.exists(saved), run.events())
+        with open(saved, "rb") as f:
+            self.assertEqual(f.read(), data)
+        self.assertFalse(os.path.exists(saved + ".part"))
+        self.assertIn("pic.bin", run.of("view")[-1])
+        self.assertEqual(run.client_rows("SELECT file_name, message FROM messages WHERE file_id IS NOT NULL"), [("pic.bin", "вот")])
 
 
 if __name__ == "__main__":

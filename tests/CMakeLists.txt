@@ -25,7 +25,7 @@ target_link_libraries(client_harness PRIVATE Qt6::Core Qt6::Network Qt6::Widgets
 
 find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_FOUND)
-    foreach(suite tls cli auth delivery presence limits client_gui)
+    foreach(suite tls cli auth delivery presence files limits client_gui)
         add_test(NAME integration_${suite}
                  COMMAND ${Python3_EXECUTABLE} -m unittest -v test_${suite}
                  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/integration)

@@ -2,6 +2,11 @@
 #include "Protocol.h"
 #include "ServerConnection.h"
 #include <QApplication>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QStatusBar>
+#include <QUrl>
+#include "FileTransfer.h"
 #include <QInputDialog>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -93,8 +98,10 @@ void MainWindow::setupUI() {
     m_chatTitle->setAlignment(Qt::AlignCenter);
     rightLayout->addWidget(m_chatTitle);
     
-    m_messagesArea = new QTextEdit();
+    m_messagesArea = new QTextBrowser();
     m_messagesArea->setReadOnly(true);
+    m_messagesArea->setOpenLinks(false);
+    connect(m_messagesArea, &QTextBrowser::anchorClicked, this, &MainWindow::onAnchorClicked);
     m_messagesArea->setStyleSheet("background-color: #1e1e1e;");
     m_messagesArea->setPlaceholderText("Здесь появится переписка.\nВыберите пользователя в списке слева (точка слева от ника — он в сети).");
     updateChatTitle();
@@ -102,6 +109,13 @@ void MainWindow::setupUI() {
     
     QHBoxLayout *inputLayout = new QHBoxLayout();
     inputLayout->setSpacing(10);
+    
+    m_attachButton = new QPushButton("📎");
+    m_attachButton->setToolTip("Прикрепить файл (до 50 МБ)");
+    m_attachButton->setDisabled(true);
+    m_attachButton->setCursor(Qt::PointingHandCursor);
+    connect(m_attachButton, &QPushButton::clicked, this, &MainWindow::onAttachClicked);
+    inputLayout->addWidget(m_attachButton);
     
     m_messageEdit = new QLineEdit();
     m_messageEdit->setPlaceholderText("Введите сообщение...");
@@ -226,7 +240,8 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
                 upsertUser(fromUserId, fromNick, m_users.value(fromUserId).online);
                 
                 int serverId = message[Protocol::ID].toInt(0);
-                auto saved = m_database->saveIncoming(fromUserId, m_nick, fromNick, text, serverId);
+                const FileAttachment file = fileFromMessage(message);
+                auto saved = m_database->saveIncoming(fromUserId, m_nick, fromNick, text, serverId, file);
                 if (saved == DatabaseClient::SaveResult::Error) {
                     // Без подтверждения сервер доставит сообщение ещё раз
                     break;
@@ -237,14 +252,14 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
                 
                 if (saved == DatabaseClient::SaveResult::Saved) {
                     if (fromUserId == m_selectedUserId) {
-                        appendMessage(fromNick, text, timestamp, false, false);
+                        appendMessage(fromNick, text, timestamp, false, false, false, file);
                         clearContactUnread(fromUserId);
                     } else {
                         markContactAsUnread(fromUserId);
                         qDebug() << "Непрочитанное сообщение от" << fromNick;
                     }
                     if (fromUserId != m_selectedUserId || !isActiveWindow()) {
-                        notifyIncoming(fromNick, text);
+                        notifyIncoming(fromNick, text.isEmpty() ? "📎 " + file.name : text);
                     }
                 }
             } else {
@@ -275,7 +290,8 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
                     upsertUser(fromUserId, fromNick, m_users.value(fromUserId).online);
                     
                     int serverId = msg["id"].toInt(0);
-                    auto saved = m_database->saveIncoming(fromUserId, m_nick, fromNick, text, serverId);
+                    const FileAttachment file = fileFromMessage(msg);
+                    auto saved = m_database->saveIncoming(fromUserId, m_nick, fromNick, text, serverId, file);
                     if (saved == DatabaseClient::SaveResult::Error) {
                         continue;
                     }
@@ -293,7 +309,7 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
                     }
                     if (fromUserId != m_selectedUserId || !isActiveWindow()) {
                         lastNewNick = fromNick;
-                        lastNewText = text;
+                        lastNewText = text.isEmpty() ? "📎 " + file.name : text;
                         ++newCount;
                     }
                 }
@@ -327,6 +343,10 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
             break;
         }
         
+        case Protocol::MessageType::FileTicket:
+            handleFileTicket(message);
+            break;
+
         case Protocol::MessageType::Presence: {
             const int userId = message[Protocol::ID].toInt();
             const QString nick = ProtocolHelper::getString(message, Protocol::NICK);
@@ -388,7 +408,7 @@ void MainWindow::sendPendingMessage(const PendingMessage &pending) {
     if (!m_connection->isAuthenticated() || pending.peerNick.isEmpty()) {
         return;
     }
-    QJsonObject message = ProtocolHelper::createOutgoingMessage(pending.peerNick, pending.message, pending.clientMsgId);
+    QJsonObject message = ProtocolHelper::createOutgoingMessage(pending.peerNick, pending.message, pending.clientMsgId, pending.fileId);
     m_connection->send(message);
 }
 
@@ -501,6 +521,7 @@ void MainWindow::selectUser(int userId) {
     
     m_messageEdit->setDisabled(false);
     m_sendButton->setDisabled(false);
+    m_attachButton->setDisabled(false);
     m_messageEdit->setFocus();
     
     for (int i = 0; i < m_contactsList->count(); ++i) {
@@ -588,17 +609,24 @@ void MainWindow::loadMessageHistory(int userId) {
     qDebug() << "Загрузка истории для userId" << userId << ", найдено записей:" << history.size();
     
     for (const auto &entry : history) {
-        appendMessage(entry.fromNick, entry.message, entry.timestamp, entry.isOutgoing, entry.isRead, entry.pending);
+        appendMessage(entry.fromNick, entry.message, entry.timestamp, entry.isOutgoing, entry.isRead, entry.pending, entry.file);
     }
     
     m_messagesArea->verticalScrollBar()->setValue(m_messagesArea->verticalScrollBar()->maximum());
 }
 
 void MainWindow::appendMessage(const QString &fromNick, const QString &text, 
-                                const QString &timestamp, bool isOutgoing, bool isRead, bool pending) {
+                                const QString &timestamp, bool isOutgoing, bool isRead, bool pending,
+                                const FileAttachment &file) {
     QString prefix = isOutgoing ? "Вы" : fromNick;
     if (pending) {
         prefix += " ⏳";
+    }
+    
+    QString fileHtml;
+    if (!file.isEmpty()) {
+        fileHtml = QString("%1📎 <a href='file:%2' style='color: #81c784;'>%3</a> (%4)")
+                       .arg(text.isEmpty() ? QString() : "<br>", file.id, file.name.toHtmlEscaped(), humanSize(file.size));
     }
     
     QString html = m_messagesArea->toHtml();
@@ -606,9 +634,9 @@ void MainWindow::appendMessage(const QString &fromNick, const QString &text,
     QString messageHtml = QString(
         "<div style='margin: 5px 0;'>"
         "<span style='color: #4caf50; font-weight: bold;'>%1:</span> "
-        "<span>%2</span>"
+        "<span>%2</span>%3"
         "</div>"
-    ).arg(prefix, text.toHtmlEscaped());
+    ).arg(prefix, text.toHtmlEscaped(), fileHtml);
     
     html += messageHtml;
     m_messagesArea->setHtml(html);
@@ -656,4 +684,160 @@ void MainWindow::onSendMessageClicked() {
 
 void MainWindow::markMessagesReadOnServer(int userId) {
     m_connection->send(ProtocolHelper::createMarkMessagesRead(userId));
+}
+
+QString MainWindow::humanSize(qint64 bytes) {
+    if (bytes < 1024) {
+        return QString("%1 Б").arg(bytes);
+    }
+    if (bytes < 1024 * 1024) {
+        return QString("%1 КБ").arg(bytes / 1024.0, 0, 'f', 1);
+    }
+    return QString("%1 МБ").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1);
+}
+
+FileAttachment MainWindow::fileFromMessage(const QJsonObject &message) const {
+    FileAttachment file;
+    file.id = ProtocolHelper::getString(message, Protocol::FILE_ID);
+    if (!file.id.isEmpty()) {
+        file.name = ProtocolHelper::getString(message, Protocol::FILE_NAME, "файл");
+        file.size = static_cast<qint64>(message[Protocol::FILE_SIZE].toDouble());
+    }
+    return file;
+}
+
+void MainWindow::onAttachClicked() {
+    if (m_selectedUserId <= 0) {
+        return;
+    }
+    const QString path = QFileDialog::getOpenFileName(this, "Выберите файл для отправки");
+    if (!path.isEmpty()) {
+        attachFile(path);
+    }
+}
+
+void MainWindow::attachFile(const QString &path) {
+    if (m_selectedUserId <= 0) {
+        return;
+    }
+    if (!m_connection->isAuthenticated()) {
+        QMessageBox::warning(this, "Файл", "Нет соединения с сервером. Попробуйте, когда оно восстановится.");
+        return;
+    }
+    const QFileInfo info(path);
+    if (info.size() <= 0 || info.size() > Protocol::MaxFileSize) {
+        QMessageBox::warning(this, "Файл", QString("Файл должен быть непустым и не больше %1 МБ")
+                                               .arg(Protocol::MaxFileSize / (1024 * 1024)));
+        return;
+    }
+
+    UploadJob job{path, info.fileName(), m_selectedUserId, m_selectedUserNick, m_messageEdit->text().trimmed()};
+    const QString ref = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    m_uploads[ref] = job;
+    m_connection->send(ProtocolHelper::createFileUploadRequest(job.name, info.size(), ref));
+    statusBar()->showMessage("Подготовка отправки: " + job.name);
+}
+
+void MainWindow::onAnchorClicked(const QUrl &url) {
+    if (url.scheme() != "file") {
+        return;
+    }
+    downloadFile(url.path());
+}
+
+void MainWindow::downloadFile(const QString &fileId, const QString &targetPath) {
+    if (!m_connection->isAuthenticated()) {
+        QMessageBox::warning(this, "Файл", "Нет соединения с сервером. Попробуйте, когда оно восстановится.");
+        return;
+    }
+    m_downloadRequests[fileId] = targetPath;
+    m_connection->send(ProtocolHelper::createFileDownloadRequest(fileId));
+}
+
+void MainWindow::handleFileTicket(const QJsonObject &message) {
+    const bool success = ProtocolHelper::getBool(message, Protocol::SUCCESS);
+    const QString ref = ProtocolHelper::getString(message, Protocol::REF);
+    const QString fileId = ProtocolHelper::getString(message, Protocol::FILE_ID);
+    const QString error = ProtocolHelper::getString(message, Protocol::MESSAGE);
+
+    if (!ref.isEmpty() && m_uploads.contains(ref)) {
+        const UploadJob job = m_uploads.take(ref);
+        if (!success) {
+            statusBar()->clearMessage();
+            QMessageBox::warning(this, "Файл", error);
+            return;
+        }
+        startUpload(job, fileId, ProtocolHelper::getString(message, Protocol::TOKEN),
+                    static_cast<qint64>(message[Protocol::FILE_SIZE].toDouble()));
+        return;
+    }
+
+    if (m_downloadRequests.contains(fileId)) {
+        const QString targetPath = m_downloadRequests.take(fileId);
+        if (!success) {
+            QMessageBox::warning(this, "Файл", error);
+            return;
+        }
+        startDownload(ProtocolHelper::getString(message, Protocol::TOKEN),
+                      ProtocolHelper::getString(message, Protocol::FILE_NAME, "файл"),
+                      static_cast<qint64>(message[Protocol::FILE_SIZE].toDouble()), targetPath);
+    }
+}
+
+void MainWindow::attachTransfer(FileTransfer *transfer, const QString &label) {
+    ++m_activeTransfers;
+    connect(transfer, &FileTransfer::progress, this, [this, label](qint64 done, qint64 total) {
+        statusBar()->showMessage(QString("%1: %2 из %3").arg(label, humanSize(done), humanSize(total)));
+    });
+    connect(transfer, &FileTransfer::finished, this, [this](bool, const QString &) {
+        if (--m_activeTransfers <= 0) {
+            statusBar()->clearMessage();
+        }
+    });
+    connect(transfer, &FileTransfer::finished, transfer, &QObject::deleteLater);
+}
+
+void MainWindow::startUpload(const UploadJob &job, const QString &fileId, const QString &token, qint64 size) {
+    auto *transfer = new FileTransfer(FileTransfer::Mode::Upload, m_connection->host(), m_connection->port(), token,
+                                      job.path, size, [this]() -> QWidget * { return this; }, this);
+    attachTransfer(transfer, "Отправка " + job.name);
+    connect(transfer, &FileTransfer::finished, this, [this, job, fileId, size](bool ok, const QString &error) {
+        if (!ok) {
+            QMessageBox::warning(this, "Файл", "Не удалось отправить «" + job.name + "»: " + error);
+            return;
+        }
+        // Дальше файл ведёт себя как обычное сообщение: хранится локально и повторяется до подтверждения
+        const FileAttachment file{fileId, job.name, size};
+        const QString clientMsgId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        if (!m_database->saveOutgoing(job.userId, m_nick, job.peerNick, job.caption, clientMsgId, file)) {
+            QMessageBox::warning(this, "Ошибка", "Не удалось сохранить сообщение в локальную базу");
+            return;
+        }
+        sendPendingMessage({job.userId, job.peerNick, job.caption, clientMsgId, fileId});
+        if (job.userId == m_selectedUserId) {
+            appendMessage(m_nick, job.caption, QDateTime::currentDateTime().toString(Qt::ISODate), true, false, true, file);
+            if (m_messageEdit->text().trimmed() == job.caption) {
+                m_messageEdit->clear();
+            }
+        }
+    });
+    transfer->start();
+}
+
+void MainWindow::startDownload(const QString &token, const QString &name, qint64 size, const QString &targetPath) {
+    const QString target = targetPath.isEmpty() ? QFileDialog::getSaveFileName(this, "Сохранить файл", name) : targetPath;
+    if (target.isEmpty()) {
+        return;
+    }
+    auto *transfer = new FileTransfer(FileTransfer::Mode::Download, m_connection->host(), m_connection->port(), token,
+                                      target, size, [this]() -> QWidget * { return this; }, this);
+    attachTransfer(transfer, "Загрузка " + name);
+    connect(transfer, &FileTransfer::finished, this, [this, name, target](bool ok, const QString &error) {
+        if (ok) {
+            statusBar()->showMessage("Сохранено: " + target, 8000);
+        } else {
+            QMessageBox::warning(this, "Файл", "Не удалось скачать «" + name + "»: " + error);
+        }
+    });
+    transfer->start();
 }

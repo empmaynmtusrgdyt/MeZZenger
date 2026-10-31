@@ -24,6 +24,12 @@ inline constexpr double MessagesPerSecond = 20.0;
 inline constexpr int MaxClientMsgIdLength = 64;
 inline constexpr int MaxAckIds = 1000;
 
+// Файлы
+inline constexpr qint64 MaxStoragePerUser = 2LL * 1024 * 1024 * 1024;
+inline constexpr int MaxPendingTickets = 10;
+inline constexpr int TicketLifetimeSec = 300;
+inline constexpr int FileIdleTimeoutMs = 60000;
+
 }
 
 #endif

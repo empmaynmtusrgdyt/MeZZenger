@@ -11,6 +11,7 @@
 #include "ClientHandler.h"
 #include "ServerLimits.h"
 #include "RateLimiter.h"
+#include "FileStore.h"
 #include <QHash>
 
 class ServerCore : public QObject {
@@ -29,6 +30,7 @@ public:
 private:
     QSslServer m_server;
     DatabaseServer m_database;
+    FileStore m_files{&m_database};
     QMap<int, ClientHandler*> m_clients;
     RateLimiter m_authLimiter{Limits::AuthMaxFailures, Limits::AuthFailureWindowSec * 1000LL};
     QHash<QString, int> m_connectionsPerIp;

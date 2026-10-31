@@ -200,6 +200,46 @@ class Conn:
                 break
         return out
 
+    def read_frame(self, timeout=5):
+        """Ровно один кадр; остальное остаётся в буфере (после file_info идут сырые байты)."""
+        end = time.time() + timeout
+        while time.time() < end:
+            if len(self.buf) >= 4:
+                n = struct.unpack(">I", self.buf[:4])[0]
+                if len(self.buf) >= 4 + n:
+                    frame = json.loads(self.buf[4:4 + n])
+                    self.buf = self.buf[4 + n:]
+                    return frame
+            try:
+                data = self.s.recv(65536)
+            except (socket.timeout, ssl.SSLWantReadError):
+                continue
+            except (ssl.SSLError, OSError):
+                self.closed = True
+                return None
+            if data == b"":
+                self.closed = True
+                return None
+            self.buf += data
+        return None
+
+    def read_exact(self, size, timeout=30):
+        end = time.time() + timeout
+        while len(self.buf) < size and time.time() < end:
+            try:
+                data = self.s.recv(1 << 20)
+            except (socket.timeout, ssl.SSLWantReadError):
+                continue
+            except (ssl.SSLError, OSError):
+                self.closed = True
+                break
+            if data == b"":
+                self.closed = True
+                break
+            self.buf += data
+        out, self.buf = self.buf[:size], self.buf[size:]
+        return out
+
     def recv(self, wait=0.6):
         """Все сообщения, пришедшие за wait секунд (плюс не прочитанные ранее)."""
         out, self.pending = self.pending, []
@@ -285,6 +325,50 @@ def sync(conn, timeout=5, presence=False):
 
 def count_of(messages, kind):
     return len([m for m in messages if m.get("type") == kind])
+
+
+def request_upload(conn, name, size, ref="r1"):
+    conn.send({"type": "file_upload_request", "file_name": name, "file_size": size, "ref": ref})
+    return conn.recv_type("file_ticket", 3)[0]
+
+
+def upload_file(server, conn, name, data, close_after=None, extra=b""):
+    """Загрузка целиком: разрешение по основному каналу, байты по отдельному соединению.
+    Возвращает (ticket, file_result); close_after - сколько байт отправить до обрыва."""
+    ticket = request_upload(conn, name, len(data))
+    if not ticket["success"]:
+        return ticket, None
+    transfer = Conn(server.port)
+    try:
+        transfer.send({"type": "file_put", "token": ticket["token"]})
+        if close_after is not None:
+            transfer.send_raw(data[:close_after])
+            return ticket, None
+        transfer.send_raw(data + extra)
+        return ticket, transfer.read_frame(10)
+    finally:
+        transfer.close()
+
+
+def download_file(server, conn, file_id):
+    """Скачивание: возвращает (ticket, bytes или None)."""
+    conn.send({"type": "file_download_request", "file_id": file_id})
+    ticket = conn.recv_type("file_ticket", 3)[0]
+    if not ticket["success"]:
+        return ticket, None
+    transfer = Conn(server.port)
+    try:
+        transfer.send({"type": "file_get", "token": ticket["token"]})
+        info = transfer.read_frame(10)
+        if info is None or info.get("type") != "file_info":
+            return ticket, None
+        return ticket, transfer.read_exact(info["size"])
+    finally:
+        transfer.close()
+
+
+def send_file_message(conn, to_nick, file_id, client_msg_id, text=""):
+    conn.send({"type": "message", "to_nick": to_nick, "text": text, "client_msg_id": client_msg_id, "file_id": file_id})
 
 
 def send_message(conn, to_nick, text, client_msg_id):

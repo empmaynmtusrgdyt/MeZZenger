@@ -89,7 +89,10 @@ bool DatabaseClient::initialize(const QString &dbPath) {
     if (!ensureColumn("server_id", "server_id INTEGER")
         || !ensureColumn("client_msg_id", "client_msg_id TEXT")
         || !ensureColumn("peer_nick", "peer_nick TEXT")
-        || !ensureColumn("status", "status INTEGER NOT NULL DEFAULT 1")) {
+        || !ensureColumn("status", "status INTEGER NOT NULL DEFAULT 1")
+        || !ensureColumn("file_id", "file_id TEXT")
+        || !ensureColumn("file_name", "file_name TEXT")
+        || !ensureColumn("file_size", "file_size INTEGER")) {
         return false;
     }
 
@@ -150,7 +153,8 @@ bool DatabaseClient::saveMessage(int userId, const QString &yourNick,
 }
 
 bool DatabaseClient::saveOutgoing(int userId, const QString &myNick, const QString &peerNick,
-                                  const QString &message, const QString &clientMsgId) {
+                                  const QString &message, const QString &clientMsgId,
+                                  const FileAttachment &file) {
     if (!m_initialized) {
         return false;
     }
@@ -158,9 +162,12 @@ bool DatabaseClient::saveOutgoing(int userId, const QString &myNick, const QStri
     QSqlQuery query = createQuery();
     query.prepare(
         "INSERT INTO messages (user_id, user_nick, my_nick, message, is_outgoing, "
-        "client_msg_id, peer_nick, status) "
-        "VALUES (:user_id, :user_nick, :my_nick, :message, 1, :cid, :peer, 0)"
+        "client_msg_id, peer_nick, status, file_id, file_name, file_size) "
+        "VALUES (:user_id, :user_nick, :my_nick, :message, 1, :cid, :peer, 0, :fid, :fname, :fsize)"
     );
+    query.bindValue(":fid", file.isEmpty() ? QVariant(QMetaType(QMetaType::QString)) : QVariant(file.id));
+    query.bindValue(":fname", file.isEmpty() ? QVariant(QMetaType(QMetaType::QString)) : QVariant(file.name));
+    query.bindValue(":fsize", file.isEmpty() ? QVariant(QMetaType(QMetaType::LongLong)) : QVariant(file.size));
     query.bindValue(":user_id", userId);
     query.bindValue(":user_nick", myNick);
     query.bindValue(":my_nick", myNick);
@@ -204,7 +211,7 @@ QList<PendingMessage> DatabaseClient::getPendingOutgoing(const QString &myNick) 
 
     QSqlQuery query = createQuery();
     query.prepare(
-        "SELECT user_id, peer_nick, message, client_msg_id FROM messages "
+        "SELECT user_id, peer_nick, message, client_msg_id, file_id FROM messages "
         "WHERE my_nick = :my_nick AND is_outgoing = 1 AND status = 0 AND client_msg_id IS NOT NULL "
         "ORDER BY id ASC"
     );
@@ -217,14 +224,15 @@ QList<PendingMessage> DatabaseClient::getPendingOutgoing(const QString &myNick) 
 
     while (query.next()) {
         pending.append({query.value(0).toInt(), query.value(1).toString(),
-                        query.value(2).toString(), query.value(3).toString()});
+                        query.value(2).toString(), query.value(3).toString(), query.value(4).toString()});
     }
     return pending;
 }
 
 DatabaseClient::SaveResult DatabaseClient::saveIncoming(int userId, const QString &myNick,
                                                         const QString &fromNick,
-                                                        const QString &message, int serverId) {
+                                                        const QString &message, int serverId,
+                                                        const FileAttachment &file) {
     if (!m_initialized) {
         return SaveResult::Error;
     }
@@ -240,9 +248,12 @@ DatabaseClient::SaveResult DatabaseClient::saveIncoming(int userId, const QStrin
     }
 
     query.prepare(
-        "INSERT INTO messages (user_id, user_nick, my_nick, message, is_outgoing, server_id) "
-        "VALUES (:user_id, :user_nick, :my_nick, :message, 0, :sid)"
+        "INSERT INTO messages (user_id, user_nick, my_nick, message, is_outgoing, server_id, file_id, file_name, file_size) "
+        "VALUES (:user_id, :user_nick, :my_nick, :message, 0, :sid, :fid, :fname, :fsize)"
     );
+    query.bindValue(":fid", file.isEmpty() ? QVariant(QMetaType(QMetaType::QString)) : QVariant(file.id));
+    query.bindValue(":fname", file.isEmpty() ? QVariant(QMetaType(QMetaType::QString)) : QVariant(file.name));
+    query.bindValue(":fsize", file.isEmpty() ? QVariant(QMetaType(QMetaType::LongLong)) : QVariant(file.size));
     query.bindValue(":user_id", userId);
     query.bindValue(":user_nick", fromNick.isEmpty() ? QString("user_%1").arg(userId) : fromNick);
     query.bindValue(":my_nick", myNick);
@@ -265,7 +276,7 @@ QList<MessageEntry> DatabaseClient::getMessageHistory(int userId, const QString 
 
     QSqlQuery query = createQuery();
     query.prepare(
-        "SELECT id, user_id, user_nick, message, timestamp, is_outgoing, is_read, status "
+        "SELECT id, user_id, user_nick, message, timestamp, is_outgoing, is_read, status, file_id, file_name, file_size "
         "FROM messages "
         "WHERE user_id = :user_id AND my_nick = :my_nick "
         "ORDER BY timestamp ASC, id ASC "
@@ -290,6 +301,9 @@ QList<MessageEntry> DatabaseClient::getMessageHistory(int userId, const QString 
         entry.isOutgoing = query.value(5).toInt() == 1;
         entry.isRead = query.value(6).toInt() == 1;
         entry.pending = query.value(7).toInt() == 0;
+        entry.file.id = query.value(8).toString();
+        entry.file.name = query.value(9).toString();
+        entry.file.size = query.value(10).toLongLong();
         
         history.append(entry);
     }

@@ -64,6 +64,10 @@ bool ServerCore::start(quint16 port, const QString &certPath, const QString &key
         return false;
     }
 
+    if (!m_files.initialize()) {
+        return false;
+    }
+
     if (!m_server.listen(QHostAddress::Any, port)) {
         qCritical() << "Не удалось запустить сервер:" << m_server.errorString();
         return false;
@@ -100,7 +104,7 @@ void ServerCore::onNewConnection() {
         ++m_connectionsPerIp[ip];
         ++m_totalConnections;
 
-        ClientHandler *handler = new ClientHandler(socket, &m_database, &m_authLimiter, this);
+        ClientHandler *handler = new ClientHandler(socket, &m_database, &m_authLimiter, &m_files, this);
         handler->setOnlineCheck([this](int userId) { return isOnline(userId); });
         connect(handler, &QObject::destroyed, this, [this, ip]() {
             --m_totalConnections;

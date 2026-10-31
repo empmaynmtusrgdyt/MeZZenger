@@ -11,13 +11,15 @@
 #include "RateLimiter.h"
 
 class DatabaseServer;
+class FileStore;
+class FileSession;
 
 class ClientHandler : public QObject {
     Q_OBJECT
 
 public:
     explicit ClientHandler(QTcpSocket *socket, DatabaseServer *db, RateLimiter *authLimiter,
-                           QObject *parent = nullptr);
+                           FileStore *files, QObject *parent = nullptr);
     ~ClientHandler();
 
     int getUserId() const { return m_userId; }
@@ -43,6 +45,8 @@ private:
     QTcpSocket *m_socket;
     DatabaseServer *m_database;
     RateLimiter *m_authLimiter;
+    FileStore *m_files;
+    FileSession *m_fileSession = nullptr;
     QString m_ipKey;
     TokenBucket m_bucket;
     QTimer *m_authTimer;
@@ -61,6 +65,9 @@ private:
     void handleMarkMessagesRead(const QJsonObject &message);
     void handleDeliveryAck(const QJsonObject &message);
     void handleChangePassword(const QJsonObject &message);
+    void handleFileUploadRequest(const QJsonObject &message);
+    void handleFileDownloadRequest(const QJsonObject &message);
+    void startFileSession(const QJsonObject &message, bool upload);
 
     void sendAuthResponse(bool success, const QString &message);
     bool checkProtocolVersion(const QJsonObject &message);
@@ -69,7 +76,7 @@ private:
     void onAuthenticated();
     void sendUserList();
     void handleGetOfflineMessages();
-    void forwardMessage(int fromUserId, int toUserId, int messageId, const QString &text);
+    void forwardMessage(int fromUserId, int toUserId, int messageId, const QString &text, const QString &fileId = QString());
 };
 
 #endif

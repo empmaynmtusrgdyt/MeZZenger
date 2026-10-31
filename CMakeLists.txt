@@ -28,6 +28,10 @@ set(SERVER_SOURCES
     server/DatabaseServer.h
     server/ClientHandler.cpp
     server/ClientHandler.h
+    server/FileStore.cpp
+    server/FileStore.h
+    server/FileSession.cpp
+    server/FileSession.h
 )
 
 add_executable(mezzenger_server ${SERVER_SOURCES})
@@ -51,6 +55,8 @@ set(CLIENT_SOURCES
     client/MainWindow.h
     client/ServerConnection.cpp
     client/ServerConnection.h
+    client/FileTransfer.cpp
+    client/FileTransfer.h
     client/DatabaseClient.cpp
     client/DatabaseClient.h
     client/TlsTrust.cpp

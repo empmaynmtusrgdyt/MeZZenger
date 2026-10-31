@@ -9,6 +9,14 @@
 #include <QList>
 #include <QDateTime>
 
+// Вложение: файл лежит на сервере, у получателя он скачивается по запросу
+struct FileAttachment {
+    QString id;
+    QString name;
+    qint64 size = 0;
+    bool isEmpty() const { return id.isEmpty(); }
+};
+
 struct MessageEntry {
     int id;
     int userId;
@@ -18,6 +26,7 @@ struct MessageEntry {
     bool isOutgoing;
     bool isRead;
     bool pending;
+    FileAttachment file;
 };
 
 // Исходящее сообщение, которое сервер ещё не подтвердил
@@ -26,6 +35,7 @@ struct PendingMessage {
     QString peerNick;
     QString message;
     QString clientMsgId;
+    QString fileId;
 };
 
 class DatabaseClient : public QObject {
@@ -45,13 +55,15 @@ public:
 
     // Исходящее сообщение сохраняется как неподтверждённое до message_ack от сервера
     bool saveOutgoing(int userId, const QString &myNick, const QString &peerNick,
-                      const QString &message, const QString &clientMsgId);
+                      const QString &message, const QString &clientMsgId,
+                      const FileAttachment &file = FileAttachment());
     bool markOutgoingSent(const QString &myNick, const QString &clientMsgId, int serverId);
     QList<PendingMessage> getPendingOutgoing(const QString &myNick);
 
     // serverId > 0 защищает от дублей при повторной доставке сервером
     SaveResult saveIncoming(int userId, const QString &myNick, const QString &fromNick,
-                            const QString &message, int serverId);
+                            const QString &message, int serverId,
+                            const FileAttachment &file = FileAttachment());
 
     QList<MessageEntry> getMessageHistory(int userId, const QString &yourNick, int limit = 200);
     QList<int> getConversationPartners(const QString &myNick);

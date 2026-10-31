@@ -8,6 +8,7 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QStyleFactory>
 #include <QTextEdit>
@@ -108,6 +109,16 @@ int main(int argc, char *argv[]) {
                     emit edits[1]->returnPressed();
                 } else if (action == "dump") {
                     report("view", mainWindow->findChild<QTextEdit *>()->toPlainText());
+                } else if (action == "attach") {
+                    mainWindow->attachFile(arg);
+                } else if (action == "download") {
+                    // Скачивает все вложения открытого чата в каталог arg под именем file_id
+                    const QString html = mainWindow->findChild<QTextEdit *>()->toHtml();
+                    QRegularExpression link("href=\"file:([0-9a-f]+)\"");
+                    for (auto it = link.globalMatch(html); it.hasNext();) {
+                        const QString id = it.next().captured(1);
+                        mainWindow->downloadFile(id, arg + "/" + id);
+                    }
                 } else if (action == "contacts") {
                     QStringList items;
                     auto *list = mainWindow->findChild<QListWidget *>();
