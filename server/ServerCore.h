@@ -9,7 +9,7 @@
 #include <QJsonObject>
 #include "DatabaseServer.h"
 #include "ClientHandler.h"
-#include "Limits.h"
+#include "ServerLimits.h"
 #include "RateLimiter.h"
 #include <QHash>
 

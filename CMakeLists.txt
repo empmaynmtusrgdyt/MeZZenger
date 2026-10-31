@@ -76,6 +76,17 @@ install(TARGETS mezzenger_server mezzenger_client
     RUNTIME DESTINATION bin
 )
 
+option(MEZZENGER_BUILD_TESTS "Собирать тесты (ctest)" ON)
+if(MEZZENGER_BUILD_TESTS)
+    find_package(Qt6 6.2 QUIET COMPONENTS Test)
+    if(Qt6Test_FOUND)
+        enable_testing()
+        add_subdirectory(tests)
+    else()
+        message(WARNING "Qt6 Test не найден, тесты не собираются")
+    endif()
+endif()
+
 message(STATUS "Qt6 Version: ${Qt6_VERSION}")
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Server target: mezzenger_server")

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build & run
 
-Qt 6.2+, C++17, CMake 3.16+. No tests or linter are configured.
+Qt 6.2+, C++17, CMake 3.16+. No linter is configured. Tests: see below.
 
 ```bash
 mkdir build && cd build
@@ -13,6 +13,8 @@ cmake --build . -j
 ./mezzenger_server [--port 5555]      # default port 5555
 ./mezzenger_client
 ```
+
+Tests (QtTest + Python `unittest`, stdlib only; written for the maintainer's Mac): `cd build && cmake .. && cmake --build . -j && ctest --output-on-failure` (~2 min). Unit tests live in `tests/unit`; `tests/integration/*.py` start a real `mezzenger_server` with a temp DB and a cert from `scripts/gen-cert.sh` (helpers in `support.py`; use `sync()` as a barrier instead of fixed sleeps); `tests/gui/client_harness.cpp` drives the real `LoginWindow`/`MainWindow` offscreen (`QT_QPA_PLATFORM=offscreen`, set by CTest). `MEZZENGER_SKIP_SLOW=1` skips the ~31 s login-timeout test. Disable with `-DMEZZENGER_BUILD_TESTS=OFF`.
 
 Two executables from one CMake project: `mezzenger_server` (Core/Network/Sql, no GUI) and `mezzenger_client` (Widgets). There is no shared library; `common/Protocol.h` is header-only and included by both via the `common` include dir. README and UI strings are in Russian.
 
@@ -23,7 +25,7 @@ Two executables from one CMake project: `mezzenger_server` (Core/Network/Sql, no
 **Server**: `ServerCore` owns a `QSslServer` (needs `server.crt`/`server.key`, see `scripts/gen-cert.sh`; plaintext clients are refused at handshake), a `DatabaseServer` (SQLite, `server.db` in the CWD), and a `QMap<userId, ClientHandler*>` of online users. Each connection gets a `ClientHandler` that does auth (login/register), persists messages through `DatabaseServer`, and emits `messageReady` so `ServerCore::sendMessageToUser` routes to the recipient if online; otherwise messages stay undelivered in the DB and are sent via `deliverOfflineMessages` on next login. Single-threaded, event-loop driven. `ClientHandler::sendMessage` deliberately does not require authentication: failed login/register responses are sent before the client is authenticated (a check there silently swallowed them once). Registration requires a one-time invite (`invite` field in `register`; hash stored in the `invites` table, created with `mezzenger_server --new-invite`, which works while the server runs); the invite is checked before the nick so taken nicks can't be probed, and consumed in the same transaction as user creation.
 
 
-**Passwords and limits**: passwords are stored as `pbkdf2-sha256$600000$<salt>$<hash>` (Qt `QPasswordDigestor`, no extra dependency); old unsalted SHA-256 hashes are still accepted and upgraded on the next successful login. `server/Limits.h` holds the server-side limits (5 failed logins/registrations/invites per 10 min per IP -> blocked, checked before hashing; 30 s to log in; 4 KiB frame cap before login; 20 connections per IP / 200 total; token bucket of 60 + 20/s per connection) and `server/RateLimiter.h` the helpers (`ipKey` folds IPv6 to /64, v4-mapped to IPv4). Limits on user data (nick 2-32, password 4-128, message 4000 chars) live in `Protocol.h` and are enforced both in the client UI and on the server. Rate-limit state is in memory: restarting the server clears lockouts. The server log redacts `password` and `invite`. Changing a limit that the client also knows about does not need a protocol bump unless honest clients would start failing.
+**Passwords and limits**: passwords are stored as `pbkdf2-sha256$600000$<salt>$<hash>` (Qt `QPasswordDigestor`, no extra dependency); old unsalted SHA-256 hashes are still accepted and upgraded on the next successful login. `server/ServerLimits.h` (not `Limits.h`: that name collides with the system `<limits.h>` on case-insensitive filesystems when `server/` is on the include path) holds the server-side limits (5 failed logins/registrations/invites per 10 min per IP -> blocked, checked before hashing; 30 s to log in; 4 KiB frame cap before login; 20 connections per IP / 200 total; token bucket of 60 + 20/s per connection) and `server/RateLimiter.h` the helpers (`ipKey` folds IPv6 to /64, v4-mapped to IPv4). Limits on user data (nick 2-32, password 4-128, message 4000 chars) live in `Protocol.h` and are enforced both in the client UI and on the server. Rate-limit state is in memory: restarting the server clears lockouts. The server log redacts `password` and `invite`. Changing a limit that the client also knows about does not need a protocol bump unless honest clients would start failing.
 
 **Delivery guarantees**: a message becomes `delivered` on the server only after the recipient sends `delivery_ack` (writing to the socket is not enough). Unacked messages are offered again via `get_offline_messages` (batches of 100, ordered by id). The sender attaches a `client_msg_id` (UUID); the server stores it with a unique index per sender, answers with `message_ack` (also for retries) and does not forward duplicates. The client stores outgoing messages locally with `status = 0` until `message_ack`, and resends them after each login (when `user_list` arrives); incoming messages are deduplicated by `(my_nick, server_id)`. Old clients that don't send acks would get every message redelivered at each login.
 

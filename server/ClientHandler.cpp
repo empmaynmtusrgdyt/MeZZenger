@@ -1,7 +1,7 @@
 #include "ClientHandler.h"
 #include "DatabaseServer.h"
 #include "Protocol.h"
-#include "Limits.h"
+#include "ServerLimits.h"
 #include <QDebug>
 #include <QJsonDocument>
 #include <QChar>
