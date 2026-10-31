@@ -47,6 +47,13 @@ namespace Protocol {
     // новые обязательные поля или сообщения). Добавление необязательных полей версию не меняет.
     // Сервер принимает только клиентов с точно такой же версией.
     inline constexpr int Version = 1;
+
+    // Ограничения на данные от пользователя (клиент ограничивает ввод, сервер проверяет сам)
+    inline constexpr int MinNickLength = 2;
+    inline constexpr int MaxNickLength = 32;
+    inline constexpr int MinPasswordLength = 4;
+    inline constexpr int MaxPasswordLength = 128;
+    inline constexpr int MaxMessageLength = 4000;
 }
 
 class ProtocolHelper {

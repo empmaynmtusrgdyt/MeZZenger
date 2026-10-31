@@ -2,8 +2,42 @@
 #include <QDebug>
 #include <QFile>
 #include <QRandomGenerator>
+#include <QPasswordDigestor>
+#include "Protocol.h"
 
 namespace {
+
+// Формат хранения пароля: "pbkdf2-sha256$<итерации>$<соль base64>$<хеш base64>".
+// Параметры лежат рядом с хешем, поэтому их можно усиливать, не ломая старые записи.
+constexpr int PasswordIterations = 600000;   // рекомендация OWASP для PBKDF2-HMAC-SHA256
+constexpr int PasswordSaltBytes = 16;
+constexpr int PasswordHashBytes = 32;
+const QString PasswordScheme = "pbkdf2-sha256";
+
+bool constantTimeEquals(const QByteArray &a, const QByteArray &b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    unsigned char diff = 0;
+    for (int i = 0; i < a.size(); ++i) {
+        diff |= static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]);
+    }
+    return diff == 0;
+}
+
+QByteArray derivePassword(const QString &password, const QByteArray &salt, int iterations) {
+    return QPasswordDigestor::deriveKeyPbkdf2(QCryptographicHash::Sha256, password.toUtf8(),
+                                              salt, iterations, PasswordHashBytes);
+}
+
+// Пароли до перехода на PBKDF2 хранились как SHA-256 без соли (64 hex-символа)
+QString legacyPasswordHash(const QString &password) {
+    return QString::fromLatin1(QCryptographicHash::hash(password.toUtf8(), QCryptographicHash::Sha256).toHex());
+}
+
+bool isLegacyHash(const QString &stored) {
+    return stored.size() == 64 && !stored.contains('$');
+}
 
 // Код сравнивается без регистра и разделителей: "abcd-efgh" == "ABCDEFGH"
 QString inviteHash(const QString &code) {
@@ -147,11 +181,11 @@ QSqlQuery DatabaseServer::createQuery() {
 }
 
 QString DatabaseServer::hashPassword(const QString &password) {
-    QByteArray hash = QCryptographicHash::hash(
-        password.toUtf8(),
-        QCryptographicHash::Sha256
-    );
-    return hash.toHex();
+    QByteArray salt(PasswordSaltBytes, 0);
+    QRandomGenerator::system()->fillRange(reinterpret_cast<quint32 *>(salt.data()), PasswordSaltBytes / 4);
+    const QByteArray hash = derivePassword(password, salt, PasswordIterations);
+    return QString("%1$%2$%3$%4").arg(PasswordScheme).arg(PasswordIterations)
+        .arg(QString::fromLatin1(salt.toBase64()), QString::fromLatin1(hash.toBase64()));
 }
 
 int DatabaseServer::createUser(const QString &nick, const QString &password) {
@@ -275,7 +309,10 @@ bool DatabaseServer::verifyPassword(int userId, const QString &password) {
         return false;
     }
 
-    QString passwordHash = hashPassword(password);
+    if (password.size() > Protocol::MaxPasswordLength) {
+        return false;
+    }
+
     QSqlQuery query = createQuery();
     query.prepare("SELECT password_hash FROM users WHERE id = :id");
     query.bindValue(":id", userId);
@@ -284,8 +321,39 @@ bool DatabaseServer::verifyPassword(int userId, const QString &password) {
         return false;
     }
 
-    QString storedHash = query.value(0).toString();
-    return storedHash == passwordHash;
+    const QString storedHash = query.value(0).toString();
+    bool matches = false;
+    bool needsUpgrade = false;
+
+    if (isLegacyHash(storedHash)) {
+        matches = constantTimeEquals(legacyPasswordHash(password).toLatin1(), storedHash.toLatin1());
+        needsUpgrade = matches;
+    } else {
+        const QStringList parts = storedHash.split('$');
+        bool iterationsOk = false;
+        const int iterations = parts.size() == 4 ? parts[1].toInt(&iterationsOk) : 0;
+        if (parts.size() != 4 || parts[0] != PasswordScheme || !iterationsOk || iterations <= 0) {
+            qWarning() << "Неизвестный формат хеша пароля у пользователя" << userId;
+            return false;
+        }
+        const QByteArray salt = QByteArray::fromBase64(parts[2].toLatin1());
+        const QByteArray expected = QByteArray::fromBase64(parts[3].toLatin1());
+        matches = constantTimeEquals(derivePassword(password, salt, iterations), expected);
+        needsUpgrade = matches && iterations < PasswordIterations;
+    }
+
+    if (matches && needsUpgrade) {
+        QSqlQuery update = createQuery();
+        update.prepare("UPDATE users SET password_hash = :hash WHERE id = :id");
+        update.bindValue(":hash", hashPassword(password));
+        update.bindValue(":id", userId);
+        if (update.exec()) {
+            qDebug() << "Хеш пароля пользователя" << userId << "обновлён до" << PasswordScheme;
+        } else {
+            qWarning() << "Не удалось обновить хеш пароля:" << update.lastError().text();
+        }
+    }
+    return matches;
 }
 
 QList<QJsonObject> DatabaseServer::getAllUsers(int excludeUserId) {

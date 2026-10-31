@@ -1,14 +1,51 @@
 #include "ClientHandler.h"
 #include "DatabaseServer.h"
 #include "Protocol.h"
+#include "Limits.h"
 #include <QDebug>
 #include <QJsonDocument>
+#include <QChar>
 
-ClientHandler::ClientHandler(QTcpSocket *socket, DatabaseServer *db, QObject *parent)
+namespace {
+
+// Описание проблемы с ником или пустая строка, если ник допустим
+QString nickProblem(const QString &nick) {
+    if (nick.size() < Protocol::MinNickLength || nick.size() > Protocol::MaxNickLength) {
+        return QString("Ник должен быть от %1 до %2 символов").arg(Protocol::MinNickLength).arg(Protocol::MaxNickLength);
+    }
+    if (nick != nick.trimmed()) {
+        return "Ник не должен начинаться или заканчиваться пробелом";
+    }
+    for (uint codePoint : nick.toUcs4()) {
+        if (!QChar::isPrint(codePoint)) {
+            return "Ник содержит недопустимые символы";
+        }
+    }
+    return QString();
+}
+
+}
+
+ClientHandler::ClientHandler(QTcpSocket *socket, DatabaseServer *db, RateLimiter *authLimiter,
+                             QObject *parent)
     : QObject(parent)
     , m_socket(socket)
     , m_database(db)
+    , m_authLimiter(authLimiter)
+    , m_ipKey(ipKey(socket->peerAddress()))
+    , m_bucket(Limits::MessageBurst, Limits::MessagesPerSecond)
+    , m_authTimer(new QTimer(this))
 {
+    // Соединение без входа не должно висеть вечно
+    m_authTimer->setSingleShot(true);
+    connect(m_authTimer, &QTimer::timeout, this, [this]() {
+        if (!m_authenticated) {
+            qWarning() << "Нет входа за" << Limits::AuthTimeoutMs / 1000 << "с, закрываем соединение с" << m_ipKey;
+            m_socket->abort();
+        }
+    });
+    m_authTimer->start(Limits::AuthTimeoutMs);
+
     connect(m_socket, &QTcpSocket::readyRead, this, &ClientHandler::readMessages);
     connect(m_socket, &QTcpSocket::disconnected, this, &ClientHandler::onDisconnected);
     connect(m_socket, QOverload<QAbstractSocket::SocketError>::of(&QAbstractSocket::errorOccurred),
@@ -48,9 +85,10 @@ void ClientHandler::readMessages() {
     while (m_buffer.size() >= static_cast<int>(HeaderSize)) {
         uint32_t messageLength = readHeader(m_buffer.left(HeaderSize));
 
-        if (messageLength == 0 || messageLength > MaxMessageSize) {
-            qWarning() << "Неверная длина сообщения";
-            m_socket->disconnectFromHost();
+        const uint32_t maxLength = m_authenticated ? MaxMessageSize : Limits::MaxUnauthFrameSize;
+        if (messageLength == 0 || messageLength > maxLength) {
+            qWarning() << "Неверная длина сообщения:" << messageLength << "от" << m_ipKey;
+            m_socket->abort();
             return;
         }
 
@@ -67,7 +105,14 @@ void ClientHandler::readMessages() {
             continue;
         }
 
-        qDebug() << "Получено сообщение от клиента:" << message;
+        // Пароль и код приглашения не должны попадать в журнал
+        QJsonObject loggable = message;
+        for (const QString &secret : {Protocol::PASSWORD, Protocol::INVITE}) {
+            if (loggable.contains(secret)) {
+                loggable[secret] = "***";
+            }
+        }
+        qDebug() << "Получено сообщение от клиента:" << loggable;
         processMessage(message);
     }
 }
@@ -75,6 +120,18 @@ void ClientHandler::readMessages() {
 void ClientHandler::processMessage(const QJsonObject &message) {
     Protocol::MessageType type = ProtocolHelper::parseMessageType(message);
     qDebug() << "Тип сообщения:" << static_cast<int>(type);
+
+    // Ограничение частоты запросов от вошедшего пользователя
+    if (m_authenticated) {
+        if (!m_bucket.tryTake()) {
+            if (!m_throttled) {
+                m_throttled = true;
+                qWarning() << "Превышен лимит частоты сообщений:" << m_nick;
+            }
+            return;
+        }
+        m_throttled = false;
+    }
 
     switch (type) {
         case Protocol::MessageType::Login:
@@ -118,12 +175,14 @@ void ClientHandler::handleLogin(const QJsonObject &message) {
     qDebug() << "handleLogin called";
     if (m_authenticated) return;
     if (!checkProtocolVersion(message)) return;
+    if (authBlocked()) return;
 
     QString nick = ProtocolHelper::getString(message, Protocol::NICK);
     QString password = ProtocolHelper::getString(message, Protocol::PASSWORD);
     qDebug() << "Login attempt, nick:" << nick;
 
-    if (nick.isEmpty() || password.isEmpty()) {
+    if (nick.isEmpty() || password.isEmpty()
+        || nick.size() > Protocol::MaxNickLength || password.size() > Protocol::MaxPasswordLength) {
         sendAuthResponse(false, "Неверный формат данных");
         return;
     }
@@ -131,22 +190,24 @@ void ClientHandler::handleLogin(const QJsonObject &message) {
     int userId = m_database->getUserIdByNick(nick);
     if (userId <= 0) {
         qDebug() << "User not found:" << nick;
+        recordAuthFailure();
         sendAuthResponse(false, "Такого пользователя не существует. Зарегистрируйтесь.");
         return;
     }
 
     if (!m_database->verifyPassword(userId, password)) {
         qDebug() << "Wrong password for:" << nick;
+        recordAuthFailure();
         sendAuthResponse(false, "Неверный пароль. Попробуйте ещё раз.");
         return;
     }
 
     m_userId = userId;
     m_nick = nick;
-    m_authenticated = true;
 
     qDebug() << "Login successful for user:" << nick << "ID:" << userId;
 
+    onAuthenticated();
     sendAuthResponse(true, "Успешно");
     sendUserList();
 
@@ -157,6 +218,7 @@ void ClientHandler::handleRegister(const QJsonObject &message) {
     qDebug() << "handleRegister called";
     if (m_authenticated) return;
     if (!checkProtocolVersion(message)) return;
+    if (authBlocked()) return;
 
     QString nick = ProtocolHelper::getString(message, Protocol::NICK);
     QString password = ProtocolHelper::getString(message, Protocol::PASSWORD);
@@ -171,7 +233,19 @@ void ClientHandler::handleRegister(const QJsonObject &message) {
     QString invite = ProtocolHelper::getString(message, Protocol::INVITE);
     if (!m_database->inviteAvailable(invite)) {
         qDebug() << "Register rejected, invalid invite for:" << nick;
+        recordAuthFailure();
         sendAuthResponse(false, "Неверный или уже использованный код приглашения");
+        return;
+    }
+
+    const QString problem = nickProblem(nick);
+    if (!problem.isEmpty()) {
+        sendAuthResponse(false, problem);
+        return;
+    }
+    if (password.size() < Protocol::MinPasswordLength || password.size() > Protocol::MaxPasswordLength) {
+        sendAuthResponse(false, QString("Пароль должен быть от %1 до %2 символов")
+                                    .arg(Protocol::MinPasswordLength).arg(Protocol::MaxPasswordLength));
         return;
     }
 
@@ -190,10 +264,10 @@ void ClientHandler::handleRegister(const QJsonObject &message) {
 
     m_userId = userId;
     m_nick = nick;
-    m_authenticated = true;
 
     qDebug() << "Registration successful for user:" << nick << "ID:" << userId;
 
+    onAuthenticated();
     sendAuthResponse(true, "Успешно");
     sendUserList();
 
@@ -206,12 +280,19 @@ void ClientHandler::handleMessage(const QJsonObject &message) {
     QString toNick = ProtocolHelper::getString(message, Protocol::TO_NICK);
     QString text = ProtocolHelper::getString(message, Protocol::TEXT);
 
-    if (toNick.isEmpty() || text.isEmpty()) return;
+    if (toNick.isEmpty() || text.isEmpty() || toNick.size() > Protocol::MaxNickLength) return;
+
+    if (text.size() > Protocol::MaxMessageLength) {
+        sendMessage(ProtocolHelper::createErrorMessage(
+            QString("Сообщение слишком длинное (максимум %1 символов)").arg(Protocol::MaxMessageLength)));
+        return;
+    }
 
     int toUserId = m_database->getUserIdByNick(toNick);
     if (toUserId <= 0 || toUserId == m_userId) return;
 
     QString clientMsgId = ProtocolHelper::getString(message, Protocol::CLIENT_MSG_ID);
+    if (clientMsgId.size() > Limits::MaxClientMsgIdLength) return;
 
     bool duplicate = false;
     int messageId = m_database->saveMessage(m_userId, toUserId, text, clientMsgId, &duplicate);
@@ -237,6 +318,9 @@ void ClientHandler::handleDeliveryAck(const QJsonObject &message) {
         int id = val.toInt();
         if (id > 0) {
             ids.append(id);
+        }
+        if (ids.size() >= Limits::MaxAckIds) {
+            break;
         }
     }
     if (ids.isEmpty()) return;
@@ -264,6 +348,28 @@ bool ClientHandler::checkProtocolVersion(const QJsonObject &message) {
                                     .arg(clientVersion > 0 ? QString::number(clientVersion) : QString("старая")));
     }
     return false;
+}
+
+bool ClientHandler::authBlocked() {
+    const qint64 retryMs = m_authLimiter->retryAfterMs(m_ipKey);
+    if (retryMs <= 0) {
+        return false;
+    }
+
+    // Проверка до вычисления хеша пароля: заблокированный адрес не нагружает сервер
+    const int minutes = static_cast<int>((retryMs + 59999) / 60000);
+    qWarning() << "Слишком много неудачных попыток входа с" << m_ipKey << "- блокировка ещё на" << minutes << "мин";
+    sendAuthResponse(false, QString("Слишком много неудачных попыток. Повторите через %1 мин.").arg(minutes));
+    return true;
+}
+
+void ClientHandler::recordAuthFailure() {
+    m_authLimiter->recordFailure(m_ipKey);
+}
+
+void ClientHandler::onAuthenticated() {
+    m_authenticated = true;
+    m_authTimer->stop();
 }
 
 void ClientHandler::sendAuthResponse(bool success, const QString &message) {

@@ -5,7 +5,9 @@
 #include <QTcpSocket>
 #include <QByteArray>
 #include <QJsonObject>
+#include <QTimer>
 #include "Protocol.h"
+#include "RateLimiter.h"
 
 class DatabaseServer;
 
@@ -13,7 +15,8 @@ class ClientHandler : public QObject {
     Q_OBJECT
 
 public:
-    explicit ClientHandler(QTcpSocket *socket, DatabaseServer *db, QObject *parent = nullptr);
+    explicit ClientHandler(QTcpSocket *socket, DatabaseServer *db, RateLimiter *authLimiter,
+                           QObject *parent = nullptr);
     ~ClientHandler();
 
     int getUserId() const { return m_userId; }
@@ -35,6 +38,11 @@ public slots:
 private:
     QTcpSocket *m_socket;
     DatabaseServer *m_database;
+    RateLimiter *m_authLimiter;
+    QString m_ipKey;
+    TokenBucket m_bucket;
+    QTimer *m_authTimer;
+    bool m_throttled = false;
     int m_userId = -1;
     QString m_nick;
     bool m_authenticated = false;
@@ -50,6 +58,9 @@ private:
 
     void sendAuthResponse(bool success, const QString &message);
     bool checkProtocolVersion(const QJsonObject &message);
+    bool authBlocked();
+    void recordAuthFailure();
+    void onAuthenticated();
     void sendUserList();
     void handleGetOfflineMessages();
     void forwardMessage(int fromUserId, int toUserId, int messageId, const QString &text);

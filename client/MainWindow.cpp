@@ -103,6 +103,7 @@ void MainWindow::setupUI() {
     
     m_messageEdit = new QLineEdit();
     m_messageEdit->setPlaceholderText("Введите сообщение...");
+    m_messageEdit->setMaxLength(Protocol::MaxMessageLength);
     m_messageEdit->setDisabled(true);
     connect(m_messageEdit, &QLineEdit::returnPressed, this, &MainWindow::onSendMessagePressed);
     inputLayout->addWidget(m_messageEdit);

@@ -88,7 +88,25 @@ void ServerCore::stop() {
 void ServerCore::onNewConnection() {
     while (m_server.hasPendingConnections()) {
         QTcpSocket *socket = m_server.nextPendingConnection();
-        ClientHandler *handler = new ClientHandler(socket, &m_database, this);
+
+        const QString ip = ipKey(socket->peerAddress());
+        if (m_totalConnections >= Limits::MaxConnectionsTotal
+            || m_connectionsPerIp.value(ip) >= Limits::MaxConnectionsPerIp) {
+            qWarning() << "Слишком много соединений, отклоняем подключение с" << ip;
+            socket->abort();
+            socket->deleteLater();
+            continue;
+        }
+        ++m_connectionsPerIp[ip];
+        ++m_totalConnections;
+
+        ClientHandler *handler = new ClientHandler(socket, &m_database, &m_authLimiter, this);
+        connect(handler, &QObject::destroyed, this, [this, ip]() {
+            --m_totalConnections;
+            if (--m_connectionsPerIp[ip] <= 0) {
+                m_connectionsPerIp.remove(ip);
+            }
+        });
 
         connect(handler, &ClientHandler::messageReady, this, [this](int toUserId, int messageId, const QJsonObject &message) {
             sendMessageToUser(toUserId, messageId, message);
@@ -99,6 +117,7 @@ void ServerCore::onNewConnection() {
                 m_clients.remove(userId);
                 qDebug() << "Клиент" << userId << "удалён из карты";
             }
+            handler->deleteLater();
         });
 
         connect(handler, &ClientHandler::authenticated, this, [this](int userId, ClientHandler *handler) {
@@ -110,7 +129,6 @@ void ServerCore::onNewConnection() {
             qDebug() << "Клиент" << userId << "аутентифицирован и добавлен в карту";
         });
 
-        m_clients.insert(-1, handler);
     }
 }
 

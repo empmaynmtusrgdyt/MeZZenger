@@ -9,6 +9,9 @@
 #include <QJsonObject>
 #include "DatabaseServer.h"
 #include "ClientHandler.h"
+#include "Limits.h"
+#include "RateLimiter.h"
+#include <QHash>
 
 class ServerCore : public QObject {
     Q_OBJECT
@@ -27,6 +30,9 @@ private:
     QSslServer m_server;
     DatabaseServer m_database;
     QMap<int, ClientHandler*> m_clients;
+    RateLimiter m_authLimiter{Limits::AuthMaxFailures, Limits::AuthFailureWindowSec * 1000LL};
+    QHash<QString, int> m_connectionsPerIp;
+    int m_totalConnections = 0;
 
     void onNewConnection();
 };

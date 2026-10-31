@@ -50,11 +50,13 @@ void LoginWindow::setupUI() {
 
     m_nickEdit = new QLineEdit();
     m_nickEdit->setPlaceholderText("Ваш ник");
+    m_nickEdit->setMaxLength(Protocol::MaxNickLength);
     formLayout->addRow("Ник:", m_nickEdit);
 
     m_passwordEdit = new QLineEdit();
     m_passwordEdit->setPlaceholderText("Пароль");
     m_passwordEdit->setEchoMode(QLineEdit::Password);
+    m_passwordEdit->setMaxLength(Protocol::MaxPasswordLength);
     formLayout->addRow("Пароль:", m_passwordEdit);
 
     m_inviteEdit = new QLineEdit();
@@ -124,8 +126,12 @@ void LoginWindow::onRegisterClicked() {
         QMessageBox::warning(this, "Ошибка", "Введите ник и пароль");
         return;
     }
-    if (password.length() < 4) {
-        QMessageBox::warning(this, "Ошибка", "Пароль должен быть не менее 4 символов");
+    if (nick.length() < Protocol::MinNickLength) {
+        QMessageBox::warning(this, "Ошибка", QString("Ник должен быть не короче %1 символов").arg(Protocol::MinNickLength));
+        return;
+    }
+    if (password.length() < Protocol::MinPasswordLength) {
+        QMessageBox::warning(this, "Ошибка", QString("Пароль должен быть не менее %1 символов").arg(Protocol::MinPasswordLength));
         return;
     }
     if (m_inviteEdit->text().trimmed().isEmpty()) {
