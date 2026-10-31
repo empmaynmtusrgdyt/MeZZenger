@@ -297,6 +297,7 @@ class ServerTestCase(unittest.TestCase):
         conn, response = auth(self.server, "login", nick, password, keep=True)
         self.assertTrue(response and response["success"], f"вход {nick}: {response}")
         conn.recv_type("user_list", 3)
+        conn.recv_type("group_list", 3)
         self.conns.append(conn)
         return conn
 

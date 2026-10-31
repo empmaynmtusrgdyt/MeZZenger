@@ -109,6 +109,11 @@ int main(int argc, char *argv[]) {
                     emit edits[1]->returnPressed();
                 } else if (action == "dump") {
                     report("view", mainWindow->findChild<QTextEdit *>()->toPlainText());
+                } else if (action == "group") {
+                    // group:название:ник1;ник2 - создаёт группу, открывает её и выбирает как текущую беседу
+                    mainWindow->createGroup(arg.section(':', 0, 0), arg.section(':', 1).split(';', Qt::SkipEmptyParts));
+                } else if (action == "leave") {
+                    mainWindow->leaveGroup();
                 } else if (action == "attach") {
                     mainWindow->attachFile(arg);
                 } else if (action == "download") {

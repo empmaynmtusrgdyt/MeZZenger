@@ -196,6 +196,26 @@ void ClientHandler::processMessage(const QJsonObject &message) {
                 handleFileDownloadRequest(message);
             }
             break;
+        case Protocol::MessageType::GroupCreate:
+            if (m_authenticated) {
+                handleGroupCreate(message);
+            }
+            break;
+        case Protocol::MessageType::GroupAdd:
+            if (m_authenticated) {
+                handleGroupAdd(message);
+            }
+            break;
+        case Protocol::MessageType::GroupRemove:
+            if (m_authenticated) {
+                handleGroupRemove(message);
+            }
+            break;
+        case Protocol::MessageType::GroupRename:
+            if (m_authenticated) {
+                handleGroupRename(message);
+            }
+            break;
         case Protocol::MessageType::ChangePassword:
             if (m_authenticated) {
                 handleChangePassword(message);
@@ -251,6 +271,7 @@ void ClientHandler::handleLogin(const QJsonObject &message) {
     onAuthenticated();
     sendAuthResponse(true, "Успешно");
     sendUserList();
+    sendGroupList();
 
     emit authenticated(m_userId, this);
 }
@@ -311,6 +332,7 @@ void ClientHandler::handleRegister(const QJsonObject &message) {
     onAuthenticated();
     sendAuthResponse(true, "Успешно");
     sendUserList();
+    sendGroupList();
 
     emit authenticated(m_userId, this);
 }
@@ -323,13 +345,20 @@ void ClientHandler::handleMessage(const QJsonObject &message) {
 
     const QString fileId = ProtocolHelper::getString(message, Protocol::FILE_ID);
 
+    const int groupId = message[Protocol::GROUP_ID].toInt(0);
+
     // Подпись к файлу может быть пустой
-    if (toNick.isEmpty() || (text.isEmpty() && fileId.isEmpty()) || toNick.size() > Protocol::MaxNickLength
+    if ((groupId <= 0 && toNick.isEmpty()) || (text.isEmpty() && fileId.isEmpty()) || toNick.size() > Protocol::MaxNickLength
         || fileId.size() > 64) return;
 
     if (text.size() > Protocol::MaxMessageLength) {
         sendMessage(ProtocolHelper::createErrorMessage(
             QString("Сообщение слишком длинное (максимум %1 символов)").arg(Protocol::MaxMessageLength)));
+        return;
+    }
+
+    if (groupId > 0) {
+        handleGroupMessage(groupId, text, fileId, message);
         return;
     }
 
@@ -518,8 +547,9 @@ void ClientHandler::handleGetOfflineMessages() {
     QList<QJsonObject> messages;
     for (const auto &msg : rawMessages) {
         int fromUserId = msg["from_user_id"].toInt();
-        QString fromNick = m_database->getNickById(fromUserId);
-        if (fromNick.isEmpty()) continue;
+        // from_user_id = 0 - служебное сообщение группы, автора у него нет
+        QString fromNick = fromUserId == 0 ? QString() : m_database->getNickById(fromUserId);
+        if (fromUserId != 0 && fromNick.isEmpty()) continue;
 
         QJsonObject resolved;
         resolved["id"] = msg["id"];
@@ -527,6 +557,12 @@ void ClientHandler::handleGetOfflineMessages() {
         resolved["from_nick"] = fromNick;
         resolved["message"] = msg["message"];
         resolved["timestamp"] = msg["timestamp"];
+        if (msg.contains(Protocol::GROUP_ID)) {
+            resolved[Protocol::GROUP_ID] = msg[Protocol::GROUP_ID];
+        }
+        if (fromUserId == 0) {
+            resolved[Protocol::SYSTEM] = true;
+        }
         if (msg.contains(Protocol::FILE_ID)) {
             resolved[Protocol::FILE_ID] = msg[Protocol::FILE_ID];
             resolved[Protocol::FILE_NAME] = msg[Protocol::FILE_NAME];
@@ -575,7 +611,8 @@ void ClientHandler::handleMarkMessagesRead(const QJsonObject &message) {
     }
 }
 
-void ClientHandler::forwardMessage(int fromUserId, int toUserId, int messageId, const QString &text, const QString &fileId) {
+void ClientHandler::forwardMessage(int fromUserId, int toUserId, int messageId, const QString &text, const QString &fileId,
+                                   int groupId) {
     QString fileName;
     qint64 fileSize = 0;
     if (!fileId.isEmpty()) {
@@ -585,7 +622,7 @@ void ClientHandler::forwardMessage(int fromUserId, int toUserId, int messageId, 
     }
     QJsonObject message = ProtocolHelper::createMessageWithTimestamp(
         m_nick, text, QDateTime::currentDateTime().toString(Qt::ISODate), fromUserId, messageId,
-        fileId, fileName, fileSize
+        fileId, fileName, fileSize, groupId
     );
     emit messageReady(toUserId, messageId, message);
 }
@@ -597,4 +634,243 @@ void ClientHandler::onDisconnected() {
 
 void ClientHandler::onError() {
     qWarning() << "Ошибка соединения:" << m_socket->errorString();
+}
+
+namespace {
+
+// Положительные неповторяющиеся id из JSON-массива, не больше limit штук
+QList<int> parseIds(const QJsonValue &value, int limit) {
+    QList<int> ids;
+    for (const QJsonValue &item : value.toArray()) {
+        const int id = item.toInt();
+        if (id > 0 && !ids.contains(id)) {
+            ids.append(id);
+        }
+        if (ids.size() >= limit) {
+            break;
+        }
+    }
+    return ids;
+}
+
+// Описание проблемы с названием группы или пустая строка
+QString groupNameProblem(const QString &name) {
+    if (name.isEmpty() || name.size() > Protocol::MaxGroupNameLength) {
+        return QString("Название группы должно быть от 1 до %1 символов").arg(Protocol::MaxGroupNameLength);
+    }
+    for (uint codePoint : name.toUcs4()) {
+        if (!QChar::isPrint(codePoint)) {
+            return "Название группы содержит недопустимые символы";
+        }
+    }
+    return QString();
+}
+
+}
+
+void ClientHandler::groupResult(bool success, const QString &message, int groupId) {
+    sendMessage(ProtocolHelper::createGroupResult(success, message, groupId));
+}
+
+void ClientHandler::sendGroupList() {
+    sendMessage(ProtocolHelper::createGroupList(m_database->groupsOf(m_userId)));
+}
+
+void ClientHandler::pushGroupInfo(int groupId) {
+    const QJsonObject group = m_database->groupInfo(groupId);
+    if (group.isEmpty()) {
+        return;
+    }
+    for (int memberId : m_database->groupMemberIds(groupId)) {
+        emit pushToUser(memberId, ProtocolHelper::createGroupInfo(group));
+    }
+}
+
+void ClientHandler::handleGroupCreate(const QJsonObject &message) {
+    const QString name = ProtocolHelper::getString(message, Protocol::NAME).trimmed();
+    if (const QString problem = groupNameProblem(name); !problem.isEmpty()) {
+        groupResult(false, problem);
+        return;
+    }
+
+    QList<int> members = parseIds(message[Protocol::MEMBERS], Protocol::MaxGroupMembers + 1);
+    members.removeAll(m_userId);
+    if (members.isEmpty() || members.size() + 1 > Protocol::MaxGroupMembers) {
+        groupResult(false, QString("В группе должно быть от 2 до %1 участников").arg(Protocol::MaxGroupMembers));
+        return;
+    }
+    for (int id : members) {
+        if (m_database->getNickById(id).isEmpty()) {
+            groupResult(false, "Один из участников не найден");
+            return;
+        }
+        if (m_database->groupCountOf(id) >= Protocol::MaxGroupsPerUser) {
+            groupResult(false, "Один из участников состоит в слишком большом числе групп");
+            return;
+        }
+    }
+    if (m_database->groupCountOf(m_userId) >= Protocol::MaxGroupsPerUser) {
+        groupResult(false, "Вы состоите в слишком большом числе групп");
+        return;
+    }
+
+    const int groupId = m_database->createGroup(name, m_userId, members);
+    if (groupId <= 0) {
+        groupResult(false, "Не удалось создать группу");
+        return;
+    }
+    qDebug() << "Группа создана:" << groupId << name << "владелец" << m_nick;
+    groupResult(true, QString(), groupId);
+    pushGroupInfo(groupId);
+}
+
+void ClientHandler::handleGroupAdd(const QJsonObject &message) {
+    const int groupId = message[Protocol::GROUP_ID].toInt(0);
+    const QJsonObject group = m_database->groupInfo(groupId);
+    if (group.isEmpty() || group[Protocol::OWNER_ID].toInt() != m_userId) {
+        groupResult(false, "Добавлять участников может только владелец группы", groupId);
+        return;
+    }
+
+    const QList<int> current = m_database->groupMemberIds(groupId);
+    QList<int> added;
+    for (int id : parseIds(message[Protocol::MEMBERS], Protocol::MaxGroupMembers)) {
+        if (current.contains(id)) {
+            continue;
+        }
+        if (m_database->getNickById(id).isEmpty()) {
+            groupResult(false, "Один из участников не найден", groupId);
+            return;
+        }
+        if (m_database->groupCountOf(id) >= Protocol::MaxGroupsPerUser) {
+            groupResult(false, "Один из участников состоит в слишком большом числе групп", groupId);
+            return;
+        }
+        added.append(id);
+    }
+    if (added.isEmpty()) {
+        groupResult(false, "Некого добавлять", groupId);
+        return;
+    }
+    if (current.size() + added.size() > Protocol::MaxGroupMembers) {
+        groupResult(false, QString("В группе не может быть больше %1 участников").arg(Protocol::MaxGroupMembers), groupId);
+        return;
+    }
+    if (!m_database->addGroupMembers(groupId, added)) {
+        groupResult(false, "Не удалось добавить участников", groupId);
+        return;
+    }
+    groupResult(true, QString(), groupId);
+    pushGroupInfo(groupId);
+
+    // Всем, включая новых: новичок видит, кто его добавил и кто ещё добавлен
+    QStringList addedNicks;
+    for (int id : added) {
+        addedNicks << m_database->getNickById(id);
+    }
+    announceToGroup(groupId, m_database->groupMemberIds(groupId), m_nick + " добавил(а) " + addedNicks.join(", "));
+}
+
+void ClientHandler::handleGroupRemove(const QJsonObject &message) {
+    const int groupId = message[Protocol::GROUP_ID].toInt(0);
+    const int userId = message[Protocol::ID].toInt(0);
+    const QJsonObject group = m_database->groupInfo(groupId);
+    const QList<int> members = m_database->groupMemberIds(groupId);
+    if (group.isEmpty() || !members.contains(m_userId) || !members.contains(userId)) {
+        groupResult(false, "Участник или группа не найдены", groupId);
+        return;
+    }
+    const int ownerId = group[Protocol::OWNER_ID].toInt();
+    if (userId != m_userId && ownerId != m_userId) {
+        groupResult(false, "Удалять участников может только владелец группы", groupId);
+        return;
+    }
+    if (!m_database->removeGroupMember(groupId, userId)) {
+        groupResult(false, "Не удалось удалить участника", groupId);
+        return;
+    }
+
+    QList<int> remaining = members;
+    remaining.removeAll(userId);
+    const QString removedNick = m_database->getNickById(userId);
+    emit pushToUser(userId, ProtocolHelper::createGroupRemoved(groupId));
+
+    if (remaining.size() < 2) {
+        // Группа из одного человека не нужна
+        for (int id : remaining) {
+            emit pushToUser(id, ProtocolHelper::createGroupRemoved(groupId));
+        }
+        m_database->deleteGroup(groupId);
+    } else {
+        if (userId == ownerId) {
+            m_database->setGroupOwner(groupId, remaining.first());
+        }
+        pushGroupInfo(groupId);
+        announceToGroup(groupId, remaining, userId == m_userId
+            ? removedNick + " покинул(а) группу"
+            : removedNick + " удалён(а) из группы");
+    }
+    groupResult(true, QString(), groupId);
+}
+
+// Служебное сообщение остальным участникам: хранится как обычное, поэтому дойдёт и тем, кто сейчас не в сети
+void ClientHandler::announceToGroup(int groupId, const QList<int> &recipients, const QString &text) {
+    for (const auto &row : m_database->saveGroupNotice(groupId, text, recipients)) {
+        QJsonObject notice = ProtocolHelper::createMessageWithTimestamp(
+            QString(), text, QDateTime::currentDateTime().toString(Qt::ISODate), 0, row.first,
+            QString(), QString(), 0, groupId, true);
+        emit messageReady(row.second, row.first, notice);
+    }
+}
+
+void ClientHandler::handleGroupRename(const QJsonObject &message) {
+    const int groupId = message[Protocol::GROUP_ID].toInt(0);
+    const QString name = ProtocolHelper::getString(message, Protocol::NAME).trimmed();
+    const QJsonObject group = m_database->groupInfo(groupId);
+    if (group.isEmpty() || group[Protocol::OWNER_ID].toInt() != m_userId) {
+        groupResult(false, "Переименовать группу может только владелец", groupId);
+        return;
+    }
+    if (const QString problem = groupNameProblem(name); !problem.isEmpty()) {
+        groupResult(false, problem, groupId);
+        return;
+    }
+    const QString oldName = group[Protocol::NAME].toString();
+    if (!m_database->renameGroup(groupId, name)) {
+        groupResult(false, "Не удалось переименовать группу", groupId);
+        return;
+    }
+    groupResult(true, QString(), groupId);
+    pushGroupInfo(groupId);
+    if (name != oldName) {
+        announceToGroup(groupId, m_database->groupMemberIds(groupId),
+                        m_nick + " переименовал(а) группу: «" + oldName + "» → «" + name + "»");
+    }
+}
+
+void ClientHandler::handleGroupMessage(int groupId, const QString &text, const QString &fileId, const QJsonObject &message) {
+    if (!m_database->groupMemberIds(groupId).contains(m_userId)) {
+        // Клиент мог не узнать, что его убрали из группы: пусть уберёт её и свои неотправленные сообщения
+        sendMessage(ProtocolHelper::createGroupRemoved(groupId));
+        return;
+    }
+
+    const QString clientMsgId = ProtocolHelper::getString(message, Protocol::CLIENT_MSG_ID);
+    if (clientMsgId.size() > Limits::MaxClientMsgIdLength) return;
+
+    bool duplicate = false;
+    QList<QPair<int, int>> created;
+    const int ackId = m_database->saveGroupMessage(m_userId, groupId, text, clientMsgId, &duplicate, fileId, &created);
+    if (ackId <= 0) {
+        return;
+    }
+    if (!clientMsgId.isEmpty()) {
+        sendMessage(ProtocolHelper::createMessageAck(clientMsgId, ackId));
+    }
+    if (duplicate) {
+        return;
+    }
+    for (const auto &row : created) {
+        forwardMessage(m_userId, row.second, row.first, text, fileId, groupId);
+    }
 }

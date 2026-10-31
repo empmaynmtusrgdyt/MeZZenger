@@ -33,7 +33,15 @@ namespace Protocol {
         FilePut,
         FileGet,
         FileInfo,
-        FileResult
+        FileResult,
+        GroupCreate,
+        GroupAdd,
+        GroupRemove,
+        GroupRename,
+        GroupResult,
+        GroupInfo,
+        GroupList,
+        GroupRemoved
     };
 
     inline const QString TYPE = "type";
@@ -61,6 +69,13 @@ namespace Protocol {
     inline const QString TOKEN = "token";
     inline const QString REF = "ref";
     inline const QString SIZE = "size";
+    inline const QString GROUP_ID = "group_id";
+    inline const QString GROUP = "group";
+    inline const QString GROUPS = "groups";
+    inline const QString MEMBERS = "members";
+    inline const QString OWNER_ID = "owner_id";
+    inline const QString NAME = "name";
+    inline const QString SYSTEM = "system";
 
     // Версия протокола. Увеличивайте при любом несовместимом изменении (смена смысла полей,
     // новые обязательные поля или сообщения). Добавление необязательных полей версию не меняет.
@@ -75,6 +90,9 @@ namespace Protocol {
     inline constexpr int MaxMessageLength = 4000;
     inline constexpr qint64 MaxFileSize = 50LL * 1024 * 1024;
     inline constexpr int MaxFileNameLength = 200;
+    inline constexpr int MaxGroupNameLength = 40;
+    inline constexpr int MaxGroupMembers = 50;
+    inline constexpr int MaxGroupsPerUser = 50;
 }
 
 class ProtocolHelper {
@@ -130,11 +148,16 @@ public:
     // Сообщение от клиента серверу. client_msg_id нужен серверу, чтобы отбросить повторную отправку.
     // fileId (если не пуст) ссылается на файл, заранее загруженный отдельным соединением.
     // Имя и размер сервер берёт из своей записи о файле, присланным значениям не верит.
+    // groupId > 0: сообщение в группу (to_nick не нужен), сервер разошлёт его участникам.
     static QJsonObject createOutgoingMessage(const QString &toNick, const QString &text, const QString &clientMsgId,
-                                             const QString &fileId = QString()) {
+                                             const QString &fileId = QString(), int groupId = 0) {
         QJsonObject obj;
         obj[Protocol::TYPE] = "message";
-        obj[Protocol::TO_NICK] = toNick;
+        if (groupId > 0) {
+            obj[Protocol::GROUP_ID] = groupId;
+        } else {
+            obj[Protocol::TO_NICK] = toNick;
+        }
         obj[Protocol::TEXT] = text;
         obj[Protocol::CLIENT_MSG_ID] = clientMsgId;
         if (!fileId.isEmpty()) {
@@ -228,9 +251,17 @@ public:
     }
 
     static QJsonObject createMessageWithTimestamp(const QString &fromNick, const QString &text, const QString &timestamp, int fromId = 0, int id = 0,
-                                                  const QString &fileId = QString(), const QString &fileName = QString(), qint64 fileSize = 0) {
+                                                  const QString &fileId = QString(), const QString &fileName = QString(), qint64 fileSize = 0,
+                                                  int groupId = 0, bool system = false) {
         QJsonObject obj;
         obj[Protocol::TYPE] = "message";
+        // Служебное сообщение группы (например, о выходе участника): без автора, показывается по центру
+        if (system) {
+            obj[Protocol::SYSTEM] = true;
+        }
+        if (groupId > 0) {
+            obj[Protocol::GROUP_ID] = groupId;
+        }
         if (id > 0) {
             obj[Protocol::ID] = id;
         }
@@ -269,6 +300,84 @@ public:
         obj[Protocol::TYPE] = "change_password_response";
         obj[Protocol::SUCCESS] = success;
         obj[Protocol::MESSAGE] = message;
+        return obj;
+    }
+
+    // Группы. Команды клиента получают group_result; состояние (group_info, group_list, group_removed)
+    // сервер присылает всем затронутым участникам сам. group: {id, name, owner_id, members: [{id, nick}]}.
+    static QJsonObject createGroupCreate(const QString &name, const QList<int> &memberIds) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "group_create";
+        obj[Protocol::NAME] = name;
+        QJsonArray arr;
+        for (int id : memberIds) {
+            arr.append(id);
+        }
+        obj[Protocol::MEMBERS] = arr;
+        return obj;
+    }
+
+    static QJsonObject createGroupAdd(int groupId, const QList<int> &memberIds) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "group_add";
+        obj[Protocol::GROUP_ID] = groupId;
+        QJsonArray arr;
+        for (int id : memberIds) {
+            arr.append(id);
+        }
+        obj[Protocol::MEMBERS] = arr;
+        return obj;
+    }
+
+    // userId == свой id - выход из группы; чужой - удаление участника (только владелец)
+    static QJsonObject createGroupRemove(int groupId, int userId) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "group_remove";
+        obj[Protocol::GROUP_ID] = groupId;
+        obj[Protocol::ID] = userId;
+        return obj;
+    }
+
+    static QJsonObject createGroupRename(int groupId, const QString &name) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "group_rename";
+        obj[Protocol::GROUP_ID] = groupId;
+        obj[Protocol::NAME] = name;
+        return obj;
+    }
+
+    static QJsonObject createGroupResult(bool success, const QString &message, int groupId = 0) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "group_result";
+        obj[Protocol::SUCCESS] = success;
+        obj[Protocol::MESSAGE] = message;
+        obj[Protocol::GROUP_ID] = groupId;
+        return obj;
+    }
+
+    static QJsonObject createGroupInfo(const QJsonObject &group) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "group_info";
+        obj[Protocol::GROUP] = group;
+        return obj;
+    }
+
+    static QJsonObject createGroupList(const QList<QJsonObject> &groups) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "group_list";
+        QJsonArray arr;
+        for (const auto &group : groups) {
+            arr.append(group);
+        }
+        obj[Protocol::GROUPS] = arr;
+        return obj;
+    }
+
+    // Пользователь больше не участник группы (или группа удалена)
+    static QJsonObject createGroupRemoved(int groupId) {
+        QJsonObject obj;
+        obj[Protocol::TYPE] = "group_removed";
+        obj[Protocol::GROUP_ID] = groupId;
         return obj;
     }
 
@@ -348,6 +457,14 @@ public:
         if (type == "file_get") return Protocol::MessageType::FileGet;
         if (type == "file_info") return Protocol::MessageType::FileInfo;
         if (type == "file_result") return Protocol::MessageType::FileResult;
+        if (type == "group_create") return Protocol::MessageType::GroupCreate;
+        if (type == "group_add") return Protocol::MessageType::GroupAdd;
+        if (type == "group_remove") return Protocol::MessageType::GroupRemove;
+        if (type == "group_rename") return Protocol::MessageType::GroupRename;
+        if (type == "group_result") return Protocol::MessageType::GroupResult;
+        if (type == "group_info") return Protocol::MessageType::GroupInfo;
+        if (type == "group_list") return Protocol::MessageType::GroupList;
+        if (type == "group_removed") return Protocol::MessageType::GroupRemoved;
         return Protocol::MessageType::Error;
     }
 

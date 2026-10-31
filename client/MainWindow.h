@@ -7,6 +7,8 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSystemTrayIcon>
+#include <QMenu>
+#include <QPair>
 #include <QTextBrowser>
 #include <QSet>
 #include <QLabel>
@@ -27,6 +29,15 @@ struct UserInfo {
     bool online = false;
 };
 
+// Группа: в списке и в локальной базе беседа группы имеет id = -group_id
+struct GroupInfo {
+    int id = 0;
+    QString name;
+    int ownerId = 0;
+    QList<QPair<int, QString>> members;
+    bool unread = false;
+};
+
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
@@ -39,6 +50,9 @@ public:
     // вынесены из обработчиков кнопок, чтобы их можно было вызвать без файловых диалогов
     void attachFile(const QString &path);
     void downloadFile(const QString &fileId, const QString &targetPath = QString());
+    // Группы: то же без диалогов (участники по никам)
+    void createGroup(const QString &name, const QStringList &nicks);
+    void leaveGroup();
 
 private slots:
     void onContactClicked(QListWidgetItem *item);
@@ -49,6 +63,11 @@ private slots:
     void onAnchorClicked(const QUrl &url);
     void onSendMessageClicked();
     void onSendMessagePressed();
+    void onNewGroup();
+    void onAddGroupMembers();
+    void onRemoveGroupMember();
+    void onRenameGroup();
+    void onShowGroupMembers();
 
 private:
     QString m_nick;
@@ -66,10 +85,14 @@ private:
     QPushButton *m_sendButton;
     QPushButton *m_attachButton;
     
-    int m_selectedUserId = -1;
+    // Выбранная беседа: > 0 - пользователь, < 0 - группа (-group_id), 0 - ничего
+    int m_selectedUserId = 0;
     QString m_selectedUserNick;
     
     QMap<int, UserInfo> m_users;
+    QMap<int, GroupInfo> m_groups;
+    bool m_selectNewGroup = false;
+    QMenu *m_groupMenu = nullptr;
 
     // Файл, выбранный для отправки, до получения разрешения сервера (ключ - ref запроса)
     struct UploadJob {
@@ -108,10 +131,20 @@ private:
     int findUserIdByNick(const QString &nick) const;
     void loadMessageHistory(int userId);
     void appendMessage(const QString &fromNick, const QString &text, const QString &timestamp, bool isOutgoing, bool isRead, bool pending = false,
-                       const FileAttachment &file = FileAttachment());
+                       const FileAttachment &file = FileAttachment(), bool isSystem = false);
     void markContactAsUnread(int userId);
     void clearContactUnread(int userId);
     void markMessagesReadOnServer(int userId);
+    QString chatName(int chatId) const;
+    bool chatExists(int chatId) const;
+    bool isChatUnread(int chatId) const;
+    void setChatUnread(int chatId, bool unread);
+    void updateGroupList(const QList<QJsonObject> &groups);
+    void upsertGroup(const QJsonObject &group, bool fromList);
+    void removeGroup(int groupId);
+    void deselectChat();
+    const GroupInfo *selectedGroup() const;
+    QList<int> pickUsers(const QString &title, const QList<UserInfo> &candidates, QString *name = nullptr);
 };
 
 #endif

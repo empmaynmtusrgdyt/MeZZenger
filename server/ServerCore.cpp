@@ -113,6 +113,12 @@ void ServerCore::onNewConnection() {
             }
         });
 
+        connect(handler, &ClientHandler::pushToUser, this, [this](int userId, const QJsonObject &message) {
+            if (isOnline(userId)) {
+                m_clients[userId]->sendMessage(message);
+            }
+        });
+
         connect(handler, &ClientHandler::messageReady, this, [this](int toUserId, int messageId, const QJsonObject &message) {
             sendMessageToUser(toUserId, messageId, message);
         });

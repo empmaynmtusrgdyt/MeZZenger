@@ -198,6 +198,86 @@ class ClientGuiTests(ServerTestCase):
         self.assertIn("pic.bin", run.of("view")[-1])
         self.assertEqual(run.client_rows("SELECT file_name, message FROM messages WHERE file_id IS NOT NULL"), [("pic.bin", "вот")])
 
+    def test_client_creates_a_group_and_writes_to_it(self):
+        self.register("alice", "pass1234")
+        bob = self.user("bob", "pass1234")
+        run = self.run_client("alice", script="1500:group:Друзья:bob,3500:send:привет всем,5500:contacts,5600:dump",
+                              duration=6500).finish()
+        got = bob.recv_type("message", 3)
+        self.assertEqual([(m["text"], m["from_nick"]) for m in got], [("привет всем", "alice")], run.events())
+        group_id = self.server.scalar("SELECT id FROM chat_groups")
+        self.assertEqual(got[0]["group_id"], group_id)
+        self.assertEqual(run.client_rows("SELECT message, status, is_outgoing FROM messages WHERE user_id = ?", -group_id),
+                         [("привет всем", 1, 1)])
+        self.assertIn("👥 Друзья", run.of("contacts")[-1])
+        self.assertIn("Вы:", run.of("view")[-1])
+
+    def test_client_receives_a_group_message_under_the_group(self):
+        alice = self.user("alice", "pass1234")
+        self.register("bob", "pass1234")
+        self.register("carol", "pass1234")
+        ids = [self.server.scalar("SELECT id FROM users WHERE nickname = ?", n) for n in ("bob", "carol")]
+        alice.send({"type": "group_create", "name": "Клуб", "members": ids})
+        gid = alice.recv_type("group_result")[0]["group_id"]
+        alice.send({"type": "message", "group_id": gid, "text": "собрание в пять", "client_msg_id": "g1"})
+        support.sync(alice)
+
+        run = self.run_client("bob", script="2500:contacts,2600:wintitle,3000:search:Клуб,4000:dump", duration=5000).finish()
+        self.assertIn("👥 Клуб", run.of("contacts")[0])
+        self.assertEqual(run.of("wintitle"), ["(1) MeZZenger - bob"])
+        self.assertEqual(run.client_rows("SELECT user_nick, message FROM messages WHERE user_id = ?", -gid),
+                         [("alice", "собрание в пять")])
+        self.assertIn("alice:", run.of("view")[-1])
+        self.assertIn("собрание в пять", run.of("view")[-1])
+        self.assertEqual(self.server.scalar("SELECT delivered FROM messages WHERE to_user_id = ?",
+                                            self.server.scalar("SELECT id FROM users WHERE nickname = 'bob'")), 1)
+
+    def test_group_disappears_live_when_the_member_is_removed(self):
+        alice = self.user("alice", "pass1234")
+        self.register("bob", "pass1234")
+        self.register("carol", "pass1234")
+        ids = [self.server.scalar("SELECT id FROM users WHERE nickname = ?", n) for n in ("bob", "carol")]
+        alice.send({"type": "group_create", "name": "Клуб", "members": ids})
+        gid = alice.recv_type("group_result")[0]["group_id"]
+
+        run = self.run_client("bob", script="2000:contacts,6000:contacts", duration=7500)
+        self.wait_contacts(run, 1)
+        alice.send({"type": "group_remove", "group_id": gid, "id": ids[0]})
+        alice.recv_type("group_result")
+        self.wait_contacts(run, 2)
+        run.finish()
+        first, second = run.of("contacts")
+        self.assertIn("👥 Клуб", first)
+        self.assertNotIn("👥", second)
+
+    def test_client_leaves_a_group(self):
+        self.register("alice", "pass1234")
+        self.register("bob", "pass1234")
+        self.register("carol", "pass1234")
+        self.run_client("bob", script="1500:group:Клуб:alice;carol,3500:leave:", duration=5000).finish()
+        members = [row[0] for row in self.server.sql(
+            "SELECT u.nickname FROM group_members gm JOIN users u ON u.id = gm.user_id ORDER BY u.nickname")]
+        self.assertEqual(members, ["alice", "carol"])
+        self.assertNotEqual(self.server.scalar("SELECT owner_id FROM chat_groups"),
+                            self.server.scalar("SELECT id FROM users WHERE nickname = 'bob'"))
+
+    def test_client_shows_a_system_message_when_someone_leaves(self):
+        alice = self.user("alice", "pass1234")
+        self.register("bob", "pass1234")
+        self.register("carol", "pass1234")
+        ids = [self.server.scalar("SELECT id FROM users WHERE nickname = ?", n) for n in ("bob", "carol")]
+        alice.send({"type": "group_create", "name": "Клуб", "members": ids})
+        gid = alice.recv_type("group_result")[0]["group_id"]
+
+        run = self.run_client("bob", script="1500:search:Клуб,5500:dump", duration=7000)
+        self.assertIsNotNone(run.wait_for("step", "search"))
+        alice.send({"type": "group_remove", "group_id": gid, "id": self.server.scalar("SELECT id FROM users WHERE nickname = 'alice'")})
+        alice.recv_type("group_result")
+        run.finish()
+        self.assertIn("alice покинул(а) группу", run.of("view")[-1])
+        self.assertEqual(run.client_rows("SELECT message, is_system FROM messages WHERE user_id = ?", -gid),
+                         [("alice покинул(а) группу", 1)])
+
 
 if __name__ == "__main__":
     unittest.main()

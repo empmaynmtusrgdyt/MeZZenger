@@ -27,6 +27,7 @@ struct MessageEntry {
     bool isRead;
     bool pending;
     FileAttachment file;
+    bool isSystem = false;
 };
 
 // Исходящее сообщение, которое сервер ещё не подтвердил
@@ -57,13 +58,14 @@ public:
     bool saveOutgoing(int userId, const QString &myNick, const QString &peerNick,
                       const QString &message, const QString &clientMsgId,
                       const FileAttachment &file = FileAttachment());
+    bool dropPending(int userId, const QString &myNick);
     bool markOutgoingSent(const QString &myNick, const QString &clientMsgId, int serverId);
     QList<PendingMessage> getPendingOutgoing(const QString &myNick);
 
     // serverId > 0 защищает от дублей при повторной доставке сервером
     SaveResult saveIncoming(int userId, const QString &myNick, const QString &fromNick,
                             const QString &message, int serverId,
-                            const FileAttachment &file = FileAttachment());
+                            const FileAttachment &file = FileAttachment(), bool isSystem = false);
 
     QList<MessageEntry> getMessageHistory(int userId, const QString &yourNick, int limit = 200);
     QList<int> getConversationPartners(const QString &myNick);

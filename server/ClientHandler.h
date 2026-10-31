@@ -35,6 +35,8 @@ signals:
     void messageReady(int toUserId, int messageId, const QJsonObject &message);
     void clientDisconnected(int userId);
     void authenticated(int userId, ClientHandler* handler);
+    // Сообщение другому пользователю (участнику группы), если он сейчас в сети
+    void pushToUser(int userId, const QJsonObject &message);
 
 public slots:
     void readMessages();
@@ -65,6 +67,15 @@ private:
     void handleMarkMessagesRead(const QJsonObject &message);
     void handleDeliveryAck(const QJsonObject &message);
     void handleChangePassword(const QJsonObject &message);
+    void handleGroupCreate(const QJsonObject &message);
+    void handleGroupAdd(const QJsonObject &message);
+    void handleGroupRemove(const QJsonObject &message);
+    void handleGroupRename(const QJsonObject &message);
+    void handleGroupMessage(int groupId, const QString &text, const QString &fileId, const QJsonObject &message);
+    void pushGroupInfo(int groupId);
+    void announceToGroup(int groupId, const QList<int> &recipients, const QString &text);
+    void sendGroupList();
+    void groupResult(bool success, const QString &message, int groupId = 0);
     void handleFileUploadRequest(const QJsonObject &message);
     void handleFileDownloadRequest(const QJsonObject &message);
     void startFileSession(const QJsonObject &message, bool upload);
@@ -76,7 +87,8 @@ private:
     void onAuthenticated();
     void sendUserList();
     void handleGetOfflineMessages();
-    void forwardMessage(int fromUserId, int toUserId, int messageId, const QString &text, const QString &fileId = QString());
+    void forwardMessage(int fromUserId, int toUserId, int messageId, const QString &text, const QString &fileId = QString(),
+                        int groupId = 0);
 };
 
 #endif

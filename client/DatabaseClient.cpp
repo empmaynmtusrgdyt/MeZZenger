@@ -92,7 +92,8 @@ bool DatabaseClient::initialize(const QString &dbPath) {
         || !ensureColumn("status", "status INTEGER NOT NULL DEFAULT 1")
         || !ensureColumn("file_id", "file_id TEXT")
         || !ensureColumn("file_name", "file_name TEXT")
-        || !ensureColumn("file_size", "file_size INTEGER")) {
+        || !ensureColumn("file_size", "file_size INTEGER")
+        || !ensureColumn("is_system", "is_system INTEGER NOT NULL DEFAULT 0")) {
         return false;
     }
 
@@ -182,6 +183,18 @@ bool DatabaseClient::saveOutgoing(int userId, const QString &myNick, const QStri
     return true;
 }
 
+// Беседа группы хранится под user_id = -group_id; когда группа пропала, её неотправленные сообщения не нужны
+bool DatabaseClient::dropPending(int userId, const QString &myNick) {
+    if (!m_initialized) {
+        return false;
+    }
+    QSqlQuery query = createQuery();
+    query.prepare("DELETE FROM messages WHERE user_id = :user_id AND my_nick = :my_nick AND is_outgoing = 1 AND status = 0");
+    query.bindValue(":user_id", userId);
+    query.bindValue(":my_nick", myNick);
+    return query.exec();
+}
+
 bool DatabaseClient::markOutgoingSent(const QString &myNick, const QString &clientMsgId, int serverId) {
     if (!m_initialized) {
         return false;
@@ -232,7 +245,7 @@ QList<PendingMessage> DatabaseClient::getPendingOutgoing(const QString &myNick) 
 DatabaseClient::SaveResult DatabaseClient::saveIncoming(int userId, const QString &myNick,
                                                         const QString &fromNick,
                                                         const QString &message, int serverId,
-                                                        const FileAttachment &file) {
+                                                        const FileAttachment &file, bool isSystem) {
     if (!m_initialized) {
         return SaveResult::Error;
     }
@@ -248,9 +261,10 @@ DatabaseClient::SaveResult DatabaseClient::saveIncoming(int userId, const QStrin
     }
 
     query.prepare(
-        "INSERT INTO messages (user_id, user_nick, my_nick, message, is_outgoing, server_id, file_id, file_name, file_size) "
-        "VALUES (:user_id, :user_nick, :my_nick, :message, 0, :sid, :fid, :fname, :fsize)"
+        "INSERT INTO messages (user_id, user_nick, my_nick, message, is_outgoing, server_id, file_id, file_name, file_size, is_system) "
+        "VALUES (:user_id, :user_nick, :my_nick, :message, 0, :sid, :fid, :fname, :fsize, :system)"
     );
+    query.bindValue(":system", isSystem ? 1 : 0);
     query.bindValue(":fid", file.isEmpty() ? QVariant(QMetaType(QMetaType::QString)) : QVariant(file.id));
     query.bindValue(":fname", file.isEmpty() ? QVariant(QMetaType(QMetaType::QString)) : QVariant(file.name));
     query.bindValue(":fsize", file.isEmpty() ? QVariant(QMetaType(QMetaType::LongLong)) : QVariant(file.size));
@@ -270,13 +284,13 @@ DatabaseClient::SaveResult DatabaseClient::saveIncoming(int userId, const QStrin
 QList<MessageEntry> DatabaseClient::getMessageHistory(int userId, const QString &yourNick, int limit) {
     QList<MessageEntry> history;
     
-    if (!m_initialized || userId <= 0) {
+    if (!m_initialized || userId == 0) {
         return history;
     }
 
     QSqlQuery query = createQuery();
     query.prepare(
-        "SELECT id, user_id, user_nick, message, timestamp, is_outgoing, is_read, status, file_id, file_name, file_size "
+        "SELECT id, user_id, user_nick, message, timestamp, is_outgoing, is_read, status, file_id, file_name, file_size, is_system "
         "FROM messages "
         "WHERE user_id = :user_id AND my_nick = :my_nick "
         "ORDER BY timestamp ASC, id ASC "
@@ -304,6 +318,7 @@ QList<MessageEntry> DatabaseClient::getMessageHistory(int userId, const QString 
         entry.file.id = query.value(8).toString();
         entry.file.name = query.value(9).toString();
         entry.file.size = query.value(10).toLongLong();
+        entry.isSystem = query.value(11).toInt() == 1;
         
         history.append(entry);
     }
@@ -340,7 +355,7 @@ QList<int> DatabaseClient::getConversationPartners(const QString &myNick) {
 }
 
 bool DatabaseClient::markMessagesAsRead(int userId, const QString &myNick) {
-    if (!m_initialized || userId <= 0) {
+    if (!m_initialized || userId == 0) {
         return false;
     }
 
@@ -361,7 +376,7 @@ bool DatabaseClient::markMessagesAsRead(int userId, const QString &myNick) {
 }
 
 int DatabaseClient::getUnreadCount(int userId, const QString &myNick) {
-    if (!m_initialized || userId <= 0) {
+    if (!m_initialized || userId == 0) {
         return 0;
     }
 
@@ -380,7 +395,7 @@ int DatabaseClient::getUnreadCount(int userId, const QString &myNick) {
 }
 
 bool DatabaseClient::clearHistory(int userId) {
-    if (!m_initialized || userId <= 0) {
+    if (!m_initialized || userId == 0) {
         return false;
     }
 

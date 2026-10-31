@@ -2,6 +2,8 @@
 #include "Protocol.h"
 #include "ServerConnection.h"
 #include <QApplication>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QStatusBar>
@@ -139,6 +141,24 @@ void MainWindow::setupMenu() {
     account->addAction("Сменить пароль...", this, &MainWindow::onChangePassword);
     account->addSeparator();
     account->addAction("Выйти", this, &QWidget::close);
+
+    m_groupMenu = menuBar()->addMenu("Группа");
+    m_groupMenu->addAction("Новая группа...", this, &MainWindow::onNewGroup);
+    m_groupMenu->addSeparator();
+    m_groupMenu->addAction("Участники...", this, &MainWindow::onShowGroupMembers);
+    m_groupMenu->addAction("Добавить участников...", this, &MainWindow::onAddGroupMembers);
+    m_groupMenu->addAction("Удалить участника...", this, &MainWindow::onRemoveGroupMember);
+    m_groupMenu->addAction("Переименовать...", this, &MainWindow::onRenameGroup);
+    m_groupMenu->addAction("Покинуть группу", this, [this]() {
+        const GroupInfo *group = selectedGroup();
+        if (!group) {
+            QMessageBox::information(this, "Группа", "Откройте группу, из которой хотите выйти");
+            return;
+        }
+        if (QMessageBox::question(this, "Группа", "Покинуть группу «" + group->name + "»?") == QMessageBox::Yes) {
+            leaveGroup();
+        }
+    });
 }
 
 void MainWindow::applyStyles() {
@@ -231,17 +251,31 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
             QString timestamp = ProtocolHelper::getString(message, Protocol::TIMESTAMP);
             qDebug() << "Message from" << fromNick << ":" << text;
             
+            const int groupId = message[Protocol::GROUP_ID].toInt(0);
+            const bool isSystem = message[Protocol::SYSTEM].toBool() && groupId > 0;
             int fromUserId = message[Protocol::FROM_ID].toInt(-1);
             if (fromUserId <= 0) {
                 fromUserId = findUserIdByNick(fromNick);
             }
+            const int serverId = message[Protocol::ID].toInt(0);
             
-            if (fromUserId > 0) {
-                upsertUser(fromUserId, fromNick, m_users.value(fromUserId).online);
+            if (groupId > 0 && !m_groups.contains(groupId)) {
+                // Группы уже нет (нас убрали): подтверждаем, чтобы сервер не присылал снова
+                if (serverId > 0) {
+                    sendDeliveryAck({serverId});
+                }
+                break;
+            }
+            
+            if (fromUserId > 0 || isSystem) {
+                // Беседа: собеседник или группа (-group_id)
+                const int chatId = groupId > 0 ? -groupId : fromUserId;
+                if (groupId == 0) {
+                    upsertUser(fromUserId, fromNick, m_users.value(fromUserId).online);
+                }
                 
-                int serverId = message[Protocol::ID].toInt(0);
                 const FileAttachment file = fileFromMessage(message);
-                auto saved = m_database->saveIncoming(fromUserId, m_nick, fromNick, text, serverId, file);
+                auto saved = m_database->saveIncoming(chatId, m_nick, fromNick, text, serverId, file, isSystem);
                 if (saved == DatabaseClient::SaveResult::Error) {
                     // Без подтверждения сервер доставит сообщение ещё раз
                     break;
@@ -251,15 +285,16 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
                 }
                 
                 if (saved == DatabaseClient::SaveResult::Saved) {
-                    if (fromUserId == m_selectedUserId) {
-                        appendMessage(fromNick, text, timestamp, false, false, false, file);
-                        clearContactUnread(fromUserId);
+                    if (chatId == m_selectedUserId) {
+                        appendMessage(fromNick, text, timestamp, false, false, false, file, isSystem);
+                        clearContactUnread(chatId);
                     } else {
-                        markContactAsUnread(fromUserId);
+                        markContactAsUnread(chatId);
                         qDebug() << "Непрочитанное сообщение от" << fromNick;
                     }
-                    if (fromUserId != m_selectedUserId || !isActiveWindow()) {
-                        notifyIncoming(fromNick, text.isEmpty() ? "📎 " + file.name : text);
+                    if (!isSystem && (chatId != m_selectedUserId || !isActiveWindow())) {
+                        notifyIncoming(groupId > 0 ? fromNick + " (" + chatName(chatId) + ")" : fromNick,
+                                       text.isEmpty() ? "📎 " + file.name : text);
                     }
                 }
             } else {
@@ -285,13 +320,26 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
                 if (fromUserId <= 0) {
                     fromUserId = findUserIdByNick(fromNick);
                 }
+                const int groupId = msg[Protocol::GROUP_ID].toInt(0);
+                const bool isSystem = msg[Protocol::SYSTEM].toBool() && groupId > 0;
+                int serverId = msg["id"].toInt(0);
                 
-                if (fromUserId > 0) {
-                    upsertUser(fromUserId, fromNick, m_users.value(fromUserId).online);
+                if (groupId > 0 && !m_groups.contains(groupId)) {
+                    // Группы уже нет: подтверждаем и забываем
+                    if (serverId > 0) {
+                        ackIds.append(serverId);
+                    }
+                    continue;
+                }
+                
+                if (fromUserId > 0 || isSystem) {
+                    const int chatId = groupId > 0 ? -groupId : fromUserId;
+                    if (groupId == 0) {
+                        upsertUser(fromUserId, fromNick, m_users.value(fromUserId).online);
+                    }
                     
-                    int serverId = msg["id"].toInt(0);
                     const FileAttachment file = fileFromMessage(msg);
-                    auto saved = m_database->saveIncoming(fromUserId, m_nick, fromNick, text, serverId, file);
+                    auto saved = m_database->saveIncoming(chatId, m_nick, fromNick, text, serverId, file, isSystem);
                     if (saved == DatabaseClient::SaveResult::Error) {
                         continue;
                     }
@@ -302,13 +350,13 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
                         continue;
                     }
                     
-                    if (fromUserId == m_selectedUserId) {
+                    if (chatId == m_selectedUserId) {
                         affectsSelectedContact = true;
                     } else {
-                        markContactAsUnread(fromUserId);
+                        markContactAsUnread(chatId);
                     }
-                    if (fromUserId != m_selectedUserId || !isActiveWindow()) {
-                        lastNewNick = fromNick;
+                    if (!isSystem && (chatId != m_selectedUserId || !isActiveWindow())) {
+                        lastNewNick = groupId > 0 ? fromNick + " (" + chatName(chatId) + ")" : fromNick;
                         lastNewText = text.isEmpty() ? "📎 " + file.name : text;
                         ++newCount;
                     }
@@ -337,7 +385,7 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
             int serverId = message[Protocol::ID].toInt(0);
             if (!clientMsgId.isEmpty() && serverId > 0
                 && m_database->markOutgoingSent(m_nick, clientMsgId, serverId)
-                && m_selectedUserId > 0) {
+                && m_selectedUserId != 0) {
                 loadMessageHistory(m_selectedUserId);
             }
             break;
@@ -345,6 +393,30 @@ void MainWindow::processServerMessage(const QJsonObject &message) {
         
         case Protocol::MessageType::FileTicket:
             handleFileTicket(message);
+            break;
+
+        case Protocol::MessageType::GroupList: {
+            QList<QJsonObject> groups;
+            for (const QJsonValue &val : message[Protocol::GROUPS].toArray()) {
+                groups.append(val.toObject());
+            }
+            updateGroupList(groups);
+            break;
+        }
+
+        case Protocol::MessageType::GroupInfo:
+            upsertGroup(message[Protocol::GROUP].toObject(), false);
+            break;
+
+        case Protocol::MessageType::GroupRemoved:
+            removeGroup(message[Protocol::GROUP_ID].toInt());
+            break;
+
+        case Protocol::MessageType::GroupResult:
+            if (!ProtocolHelper::getBool(message, Protocol::SUCCESS)) {
+                m_selectNewGroup = false;
+                QMessageBox::warning(this, "Группа", ProtocolHelper::getString(message, Protocol::MESSAGE));
+            }
             break;
 
         case Protocol::MessageType::Presence: {
@@ -390,7 +462,7 @@ void MainWindow::updateUserList(const QList<QJsonObject> &users) {
     
     // Получатель неподтверждённого сообщения может быть неизвестен серверу (переписки ещё нет)
     for (const auto &pending : m_database->getPendingOutgoing(m_nick)) {
-        if (!m_users.contains(pending.userId) && !pending.peerNick.isEmpty()) {
+        if (pending.userId > 0 && !m_users.contains(pending.userId) && !pending.peerNick.isEmpty()) {
             UserInfo info;
             info.id = pending.userId;
             info.nick = pending.peerNick;
@@ -405,7 +477,15 @@ void MainWindow::updateUserList(const QList<QJsonObject> &users) {
 }
 
 void MainWindow::sendPendingMessage(const PendingMessage &pending) {
-    if (!m_connection->isAuthenticated() || pending.peerNick.isEmpty()) {
+    if (!m_connection->isAuthenticated()) {
+        return;
+    }
+    if (pending.userId < 0) {
+        m_connection->send(ProtocolHelper::createOutgoingMessage(QString(), pending.message, pending.clientMsgId,
+                                                                 pending.fileId, -pending.userId));
+        return;
+    }
+    if (pending.peerNick.isEmpty()) {
         return;
     }
     QJsonObject message = ProtocolHelper::createOutgoingMessage(pending.peerNick, pending.message, pending.clientMsgId, pending.fileId);
@@ -452,8 +532,12 @@ void MainWindow::upsertUser(int userId, const QString &nick, bool online) {
     }
 }
 
-// Все известные пользователи: сначала те, кто в сети, затем по алфавиту
+// Группы сверху по алфавиту, затем пользователи: сначала те, кто в сети, затем по алфавиту
 void MainWindow::rebuildSidebar() {
+    QList<GroupInfo> groups = m_groups.values();
+    std::sort(groups.begin(), groups.end(), [](const GroupInfo &a, const GroupInfo &b) {
+        return a.name.compare(b.name, Qt::CaseInsensitive) < 0;
+    });
     QList<UserInfo> sorted = m_users.values();
     std::sort(sorted.begin(), sorted.end(), [](const UserInfo &a, const UserInfo &b) {
         if (a.online != b.online) {
@@ -463,6 +547,17 @@ void MainWindow::rebuildSidebar() {
     });
     
     m_contactsList->clear();
+    for (const GroupInfo &group : groups) {
+        QListWidgetItem *item = new QListWidgetItem(QString::fromUtf8("👥 ") + group.name);
+        item->setData(Qt::UserRole, -group.id);
+        QFont font = item->font();
+        font.setBold(group.unread);
+        item->setFont(font);
+        m_contactsList->addItem(item);
+        if (-group.id == m_selectedUserId) {
+            m_contactsList->setCurrentItem(item);
+        }
+    }
     for (const UserInfo &info : sorted) {
         QListWidgetItem *item = new QListWidgetItem((info.online ? QString::fromUtf8("● ") : QString::fromUtf8("○ ")) + info.nick);
         item->setData(Qt::UserRole, info.id);
@@ -485,8 +580,8 @@ void MainWindow::applyFilter() {
     const QString filter = m_searchEdit->text().trimmed();
     for (int i = 0; i < m_contactsList->count(); ++i) {
         QListWidgetItem *item = m_contactsList->item(i);
-        const QString nick = m_users.value(item->data(Qt::UserRole).toInt()).nick;
-        item->setHidden(!filter.isEmpty() && !nick.contains(filter, Qt::CaseInsensitive));
+        const QString name = chatName(item->data(Qt::UserRole).toInt());
+        item->setHidden(!filter.isEmpty() && !name.contains(filter, Qt::CaseInsensitive));
     }
 }
 
@@ -510,14 +605,47 @@ void MainWindow::onContactClicked(QListWidgetItem *item) {
     selectUser(item->data(Qt::UserRole).toInt());
 }
 
+QString MainWindow::chatName(int chatId) const {
+    return chatId < 0 ? m_groups.value(-chatId).name : m_users.value(chatId).nick;
+}
+
+bool MainWindow::chatExists(int chatId) const {
+    return chatId < 0 ? m_groups.contains(-chatId) : m_users.contains(chatId);
+}
+
+bool MainWindow::isChatUnread(int chatId) const {
+    return chatId < 0 ? m_groups.value(-chatId).unread : m_users.value(chatId).unread;
+}
+
+void MainWindow::setChatUnread(int chatId, bool unread) {
+    if (!chatExists(chatId) || isChatUnread(chatId) == unread) {
+        return;
+    }
+    if (chatId < 0) {
+        m_groups[-chatId].unread = unread;
+    } else {
+        m_users[chatId].unread = unread;
+    }
+    rebuildSidebar();
+}
+
+const GroupInfo *MainWindow::selectedGroup() const {
+    if (m_selectedUserId >= 0) {
+        return nullptr;
+    }
+    const auto it = m_groups.constFind(-m_selectedUserId);
+    return it == m_groups.constEnd() ? nullptr : &it.value();
+}
+
+// userId: пользователь (> 0) или группа (-group_id)
 void MainWindow::selectUser(int userId) {
-    if (!m_users.contains(userId)) {
+    if (userId == 0 || !chatExists(userId)) {
         return;
     }
     clearContactUnread(userId);
     
     m_selectedUserId = userId;
-    m_selectedUserNick = m_users[userId].nick;
+    m_selectedUserNick = userId > 0 ? m_users[userId].nick : QString();
     
     m_messageEdit->setDisabled(false);
     m_sendButton->setDisabled(false);
@@ -534,11 +662,27 @@ void MainWindow::selectUser(int userId) {
     
     updateChatTitle();
     loadMessageHistory(userId);
-    markMessagesReadOnServer(userId);
+    if (userId > 0) {
+        markMessagesReadOnServer(userId);
+    }
     m_database->markMessagesAsRead(userId, m_nick);
 }
 
+void MainWindow::deselectChat() {
+    m_selectedUserId = 0;
+    m_selectedUserNick.clear();
+    m_messagesArea->clear();
+    m_messageEdit->setDisabled(true);
+    m_sendButton->setDisabled(true);
+    m_attachButton->setDisabled(true);
+    updateChatTitle();
+}
+
 void MainWindow::updateChatTitle() {
+    if (const GroupInfo *group = selectedGroup()) {
+        m_chatTitle->setText(QString("👥 %1 — участников: %2").arg(group->name).arg(group->members.size()));
+        return;
+    }
     if (m_selectedUserId <= 0 || !m_users.contains(m_selectedUserId)) {
         m_chatTitle->setText(m_users.isEmpty() ? "Пока нет других пользователей" : "Выберите пользователя для переписки");
         return;
@@ -551,6 +695,9 @@ void MainWindow::updateWindowTitle() {
     int unread = 0;
     for (const auto &user : m_users) {
         unread += user.unread ? 1 : 0;
+    }
+    for (const auto &group : m_groups) {
+        unread += group.unread ? 1 : 0;
     }
     setWindowTitle((unread > 0 ? QString("(%1) ").arg(unread) : QString()) + "MeZZenger - " + m_nick);
 }
@@ -609,7 +756,8 @@ void MainWindow::loadMessageHistory(int userId) {
     qDebug() << "Загрузка истории для userId" << userId << ", найдено записей:" << history.size();
     
     for (const auto &entry : history) {
-        appendMessage(entry.fromNick, entry.message, entry.timestamp, entry.isOutgoing, entry.isRead, entry.pending, entry.file);
+        appendMessage(entry.fromNick, entry.message, entry.timestamp, entry.isOutgoing, entry.isRead, entry.pending, entry.file,
+                      entry.isSystem);
     }
     
     m_messagesArea->verticalScrollBar()->setValue(m_messagesArea->verticalScrollBar()->maximum());
@@ -617,7 +765,12 @@ void MainWindow::loadMessageHistory(int userId) {
 
 void MainWindow::appendMessage(const QString &fromNick, const QString &text, 
                                 const QString &timestamp, bool isOutgoing, bool isRead, bool pending,
-                                const FileAttachment &file) {
+                                const FileAttachment &file, bool isSystem) {
+    if (isSystem) {
+        m_messagesArea->setHtml(m_messagesArea->toHtml() + QString(
+            "<div style='margin: 5px 0; text-align: center; color: #888888;'><i>%1</i></div>").arg(text.toHtmlEscaped()));
+        return;
+    }
     QString prefix = isOutgoing ? "Вы" : fromNick;
     if (pending) {
         prefix += " ⏳";
@@ -643,19 +796,11 @@ void MainWindow::appendMessage(const QString &fromNick, const QString &text,
 }
 
 void MainWindow::markContactAsUnread(int userId) {
-    if (!m_users.contains(userId) || m_users[userId].unread) {
-        return;
-    }
-    m_users[userId].unread = true;
-    rebuildSidebar();
+    setChatUnread(userId, true);
 }
 
 void MainWindow::clearContactUnread(int userId) {
-    if (!m_users.contains(userId) || !m_users[userId].unread) {
-        return;
-    }
-    m_users[userId].unread = false;
-    rebuildSidebar();
+    setChatUnread(userId, false);
 }
 
 void MainWindow::onSendMessagePressed() {
@@ -664,7 +809,7 @@ void MainWindow::onSendMessagePressed() {
 
 void MainWindow::onSendMessageClicked() {
     QString text = m_messageEdit->text().trimmed();
-    if (text.isEmpty() || m_selectedUserId <= 0) {
+    if (text.isEmpty() || m_selectedUserId == 0) {
         return;
     }
     
@@ -707,7 +852,7 @@ FileAttachment MainWindow::fileFromMessage(const QJsonObject &message) const {
 }
 
 void MainWindow::onAttachClicked() {
-    if (m_selectedUserId <= 0) {
+    if (m_selectedUserId == 0) {
         return;
     }
     const QString path = QFileDialog::getOpenFileName(this, "Выберите файл для отправки");
@@ -717,7 +862,7 @@ void MainWindow::onAttachClicked() {
 }
 
 void MainWindow::attachFile(const QString &path) {
-    if (m_selectedUserId <= 0) {
+    if (m_selectedUserId == 0) {
         return;
     }
     if (!m_connection->isAuthenticated()) {
@@ -840,4 +985,237 @@ void MainWindow::startDownload(const QString &token, const QString &name, qint64
         }
     });
     transfer->start();
+}
+
+namespace {
+
+GroupInfo groupFromJson(const QJsonObject &json) {
+    GroupInfo group;
+    group.id = json[Protocol::ID].toInt();
+    group.name = json[Protocol::NAME].toString();
+    group.ownerId = json[Protocol::OWNER_ID].toInt();
+    for (const QJsonValue &value : json[Protocol::MEMBERS].toArray()) {
+        const QJsonObject member = value.toObject();
+        group.members.append({member[Protocol::ID].toInt(), member[Protocol::NICK].toString()});
+    }
+    return group;
+}
+
+}
+
+void MainWindow::updateGroupList(const QList<QJsonObject> &groups) {
+    const QMap<int, GroupInfo> previous = m_groups;
+    m_groups.clear();
+    for (const QJsonObject &json : groups) {
+        GroupInfo group = groupFromJson(json);
+        if (group.id <= 0) {
+            continue;
+        }
+        group.unread = previous.value(group.id).unread;
+        m_groups[group.id] = group;
+    }
+
+    // Неотправленные сообщения в группы, из которых нас убрали, уже не нужны
+    for (const auto &pending : m_database->getPendingOutgoing(m_nick)) {
+        if (pending.userId < 0 && !m_groups.contains(-pending.userId)) {
+            m_database->dropPending(pending.userId, m_nick);
+        }
+    }
+    if (m_selectedUserId < 0 && !m_groups.contains(-m_selectedUserId)) {
+        deselectChat();
+    }
+    rebuildSidebar();
+    updateChatTitle();
+}
+
+void MainWindow::upsertGroup(const QJsonObject &json, bool) {
+    GroupInfo group = groupFromJson(json);
+    if (group.id <= 0) {
+        return;
+    }
+    const bool isNew = !m_groups.contains(group.id);
+    group.unread = m_groups.value(group.id).unread;
+    m_groups[group.id] = group;
+    rebuildSidebar();
+    if (-group.id == m_selectedUserId) {
+        updateChatTitle();
+    }
+    if (isNew && m_selectNewGroup) {
+        m_selectNewGroup = false;
+        selectUser(-group.id);
+    }
+}
+
+void MainWindow::removeGroup(int groupId) {
+    if (!m_groups.remove(groupId)) {
+        return;
+    }
+    m_database->dropPending(-groupId, m_nick);
+    if (m_selectedUserId == -groupId) {
+        deselectChat();
+    }
+    rebuildSidebar();
+}
+
+QList<int> MainWindow::pickUsers(const QString &title, const QList<UserInfo> &candidates, QString *name) {
+    QDialog dialog(this);
+    dialog.setWindowTitle(title);
+    auto *layout = new QVBoxLayout(&dialog);
+
+    QLineEdit *nameEdit = nullptr;
+    if (name) {
+        nameEdit = new QLineEdit();
+        nameEdit->setPlaceholderText("Название группы");
+        nameEdit->setMaxLength(Protocol::MaxGroupNameLength);
+        layout->addWidget(nameEdit);
+    }
+    layout->addWidget(new QLabel("Участники:"));
+
+    auto *list = new QListWidget();
+    for (const UserInfo &user : candidates) {
+        auto *item = new QListWidgetItem(user.nick);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(Qt::Unchecked);
+        item->setData(Qt::UserRole, user.id);
+        list->addItem(item);
+    }
+    layout->addWidget(list);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    QList<int> chosen;
+    if (dialog.exec() != QDialog::Accepted) {
+        return chosen;
+    }
+    if (name) {
+        *name = nameEdit->text().trimmed();
+    }
+    for (int i = 0; i < list->count(); ++i) {
+        if (list->item(i)->checkState() == Qt::Checked) {
+            chosen.append(list->item(i)->data(Qt::UserRole).toInt());
+        }
+    }
+    return chosen;
+}
+
+void MainWindow::onNewGroup() {
+    if (m_users.isEmpty()) {
+        QMessageBox::information(this, "Новая группа", "Пока нет других пользователей");
+        return;
+    }
+    QString name;
+    const QList<int> ids = pickUsers("Новая группа", m_users.values(), &name);
+    if (ids.isEmpty() && name.isEmpty()) {
+        return;
+    }
+    if (name.isEmpty() || ids.isEmpty()) {
+        QMessageBox::warning(this, "Новая группа", "Введите название и выберите хотя бы одного участника");
+        return;
+    }
+    m_selectNewGroup = true;
+    m_connection->send(ProtocolHelper::createGroupCreate(name, ids));
+}
+
+void MainWindow::createGroup(const QString &name, const QStringList &nicks) {
+    QList<int> ids;
+    for (const QString &nick : nicks) {
+        const int id = findUserIdByNick(nick);
+        if (id <= 0) {
+            QMessageBox::warning(this, "Новая группа", "Пользователь не найден: " + nick);
+            return;
+        }
+        ids.append(id);
+    }
+    m_selectNewGroup = true;
+    m_connection->send(ProtocolHelper::createGroupCreate(name, ids));
+}
+
+void MainWindow::onShowGroupMembers() {
+    const GroupInfo *group = selectedGroup();
+    if (!group) {
+        QMessageBox::information(this, "Группа", "Откройте группу в списке слева");
+        return;
+    }
+    QStringList lines;
+    for (const auto &member : group->members) {
+        lines << member.second + (member.first == group->ownerId ? " (владелец)" : QString());
+    }
+    QMessageBox::information(this, group->name, lines.join('\n'));
+}
+
+void MainWindow::onAddGroupMembers() {
+    const GroupInfo *group = selectedGroup();
+    if (!group) {
+        QMessageBox::information(this, "Группа", "Откройте группу в списке слева");
+        return;
+    }
+    QList<UserInfo> candidates;
+    for (const UserInfo &user : m_users) {
+        bool isMember = false;
+        for (const auto &member : group->members) {
+            isMember = isMember || member.first == user.id;
+        }
+        if (!isMember) {
+            candidates.append(user);
+        }
+    }
+    if (candidates.isEmpty()) {
+        QMessageBox::information(this, group->name, "Все пользователи уже в группе");
+        return;
+    }
+    const QList<int> ids = pickUsers("Добавить в «" + group->name + "»", candidates);
+    if (!ids.isEmpty()) {
+        m_connection->send(ProtocolHelper::createGroupAdd(group->id, ids));
+    }
+}
+
+void MainWindow::onRemoveGroupMember() {
+    const GroupInfo *group = selectedGroup();
+    if (!group) {
+        QMessageBox::information(this, "Группа", "Откройте группу в списке слева");
+        return;
+    }
+    QStringList nicks;
+    QMap<QString, int> ids;
+    for (const auto &member : group->members) {
+        if (member.second != m_nick) {
+            nicks << member.second;
+            ids[member.second] = member.first;
+        }
+    }
+    bool ok = false;
+    const QString nick = QInputDialog::getItem(this, group->name, "Удалить участника:", nicks, 0, false, &ok);
+    if (ok && ids.contains(nick)) {
+        m_connection->send(ProtocolHelper::createGroupRemove(group->id, ids[nick]));
+    }
+}
+
+void MainWindow::onRenameGroup() {
+    const GroupInfo *group = selectedGroup();
+    if (!group) {
+        QMessageBox::information(this, "Группа", "Откройте группу в списке слева");
+        return;
+    }
+    bool ok = false;
+    const QString name = QInputDialog::getText(this, "Переименовать группу", "Новое название:", QLineEdit::Normal,
+                                               group->name, &ok).trimmed();
+    if (ok && !name.isEmpty()) {
+        m_connection->send(ProtocolHelper::createGroupRename(group->id, name));
+    }
+}
+
+void MainWindow::leaveGroup() {
+    const GroupInfo *group = selectedGroup();
+    if (!group) {
+        return;
+    }
+    for (const auto &member : group->members) {
+        if (member.second == m_nick) {
+            m_connection->send(ProtocolHelper::createGroupRemove(group->id, member.first));
+            return;
+        }
+    }
 }

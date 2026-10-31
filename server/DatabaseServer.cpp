@@ -158,7 +158,7 @@ bool DatabaseServer::initialize(const QString &dbPath) {
         }
     }
 
-    for (const char *column : {"file_id TEXT", "file_name TEXT", "file_size INTEGER"}) {
+    for (const char *column : {"file_id TEXT", "file_name TEXT", "file_size INTEGER", "group_id INTEGER"}) {
         const QString name = QString::fromLatin1(column).section(' ', 0, 0);
         query.exec("PRAGMA table_info(messages)");
         bool present = false;
@@ -190,8 +190,27 @@ bool DatabaseServer::initialize(const QString &dbPath) {
     query.exec("CREATE INDEX IF NOT EXISTS idx_messages_file ON messages(file_id)");
 
     if (!query.exec(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_msg "
-        "ON messages(from_user_id, client_msg_id) WHERE client_msg_id IS NOT NULL"
+        "CREATE TABLE IF NOT EXISTS chat_groups ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "name TEXT NOT NULL, "
+        "owner_id INTEGER NOT NULL, "
+        "created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+    ) || !query.exec(
+        "CREATE TABLE IF NOT EXISTS group_members ("
+        "group_id INTEGER NOT NULL, "
+        "user_id INTEGER NOT NULL, "
+        "PRIMARY KEY (group_id, user_id))"
+    )) {
+        qCritical() << "Ошибка создания таблиц групп:" << query.lastError().text();
+        return false;
+    }
+    query.exec("CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id)");
+
+    // Сообщение в группу даёт несколько строк с одним client_msg_id (по строке на получателя)
+    query.exec("DROP INDEX IF EXISTS idx_messages_client_msg");
+    if (!query.exec(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_msg_to "
+        "ON messages(from_user_id, client_msg_id, to_user_id) WHERE client_msg_id IS NOT NULL"
     )) {
         qCritical() << "Не удалось создать индекс client_msg_id:" << query.lastError().text();
         return false;
@@ -500,16 +519,10 @@ int DatabaseServer::saveMessage(int fromUserId, int toUserId, const QString &mes
         }
     }
 
-    // Имя и размер берутся из записи о файле, а не из сообщения клиента
     QString fileName;
     qint64 fileSize = 0;
-    if (!fileId.isEmpty()) {
-        const QJsonObject info = fileInfo(fileId);
-        if (info.isEmpty() || info["owner_id"].toInt() != fromUserId || !info["complete"].toBool()) {
-            return -1;
-        }
-        fileName = info["name"].toString();
-        fileSize = static_cast<qint64>(info["size"].toDouble());
+    if (!fileId.isEmpty() && !resolveAttachment(fromUserId, fileId, &fileName, &fileSize)) {
+        return -1;
     }
 
     query.prepare(
@@ -532,6 +545,17 @@ int DatabaseServer::saveMessage(int fromUserId, int toUserId, const QString &mes
     return query.lastInsertId().toInt();
 }
 
+// Имя и размер берутся из записи о файле, а не из сообщения клиента; прикрепить можно только свой готовый файл
+bool DatabaseServer::resolveAttachment(int fromUserId, const QString &fileId, QString *name, qint64 *size) {
+    const QJsonObject info = fileInfo(fileId);
+    if (info.isEmpty() || info["owner_id"].toInt() != fromUserId || !info["complete"].toBool()) {
+        return false;
+    }
+    *name = info["name"].toString();
+    *size = static_cast<qint64>(info["size"].toDouble());
+    return true;
+}
+
 QList<QJsonObject> DatabaseServer::getUndeliveredMessages(int toUserId) {
     QList<QJsonObject> messages;
 
@@ -541,7 +565,7 @@ QList<QJsonObject> DatabaseServer::getUndeliveredMessages(int toUserId) {
 
     QSqlQuery query = createQuery();
     query.prepare(
-        "SELECT id, from_user_id, message, timestamp, file_id, file_name, file_size FROM messages "
+        "SELECT id, from_user_id, message, timestamp, file_id, file_name, file_size, group_id FROM messages "
         "WHERE to_user_id = :to AND delivered = 0 "
         "ORDER BY id ASC "
         "LIMIT 100"
@@ -563,6 +587,9 @@ QList<QJsonObject> DatabaseServer::getUndeliveredMessages(int toUserId) {
             msg[Protocol::FILE_ID] = query.value(4).toString();
             msg[Protocol::FILE_NAME] = query.value(5).toString();
             msg[Protocol::FILE_SIZE] = query.value(6).toLongLong();
+        }
+        if (!query.value(7).isNull()) {
+            msg[Protocol::GROUP_ID] = query.value(7).toInt();
         }
         messages.append(msg);
     }
@@ -691,4 +718,257 @@ QStringList DatabaseServer::staleFileIds() {
         }
     }
     return ids;
+}
+
+int DatabaseServer::createGroup(const QString &name, int ownerId, const QList<int> &memberIds) {
+    if (!m_db.transaction()) {
+        return -1;
+    }
+    QSqlQuery query = createQuery();
+    query.prepare("INSERT INTO chat_groups (name, owner_id) VALUES (:name, :owner)");
+    query.bindValue(":name", name);
+    query.bindValue(":owner", ownerId);
+    if (!query.exec()) {
+        qWarning() << "Ошибка создания группы:" << query.lastError().text();
+        m_db.rollback();
+        return -1;
+    }
+    const int groupId = query.lastInsertId().toInt();
+
+    // Владелец вступает первым
+    QList<int> ordered{ownerId};
+    for (int id : memberIds) {
+        if (!ordered.contains(id)) {
+            ordered.append(id);
+        }
+    }
+    for (int id : ordered) {
+        query.prepare("INSERT INTO group_members (group_id, user_id) VALUES (:g, :u)");
+        query.bindValue(":g", groupId);
+        query.bindValue(":u", id);
+        if (!query.exec()) {
+            qWarning() << "Ошибка добавления участника:" << query.lastError().text();
+            m_db.rollback();
+            return -1;
+        }
+    }
+    return m_db.commit() ? groupId : -1;
+}
+
+QJsonObject DatabaseServer::groupInfo(int groupId) {
+    QJsonObject group;
+    QSqlQuery query = createQuery();
+    query.prepare("SELECT name, owner_id FROM chat_groups WHERE id = :id");
+    query.bindValue(":id", groupId);
+    if (!query.exec() || !query.next()) {
+        return group;
+    }
+    group[Protocol::ID] = groupId;
+    group[Protocol::NAME] = query.value(0).toString();
+    group[Protocol::OWNER_ID] = query.value(1).toInt();
+
+    QJsonArray members;
+    query.prepare(
+        "SELECT u.id, u.nickname FROM group_members gm JOIN users u ON u.id = gm.user_id "
+        "WHERE gm.group_id = :id ORDER BY gm.rowid"
+    );
+    query.bindValue(":id", groupId);
+    if (query.exec()) {
+        while (query.next()) {
+            QJsonObject member;
+            member[Protocol::ID] = query.value(0).toInt();
+            member[Protocol::NICK] = query.value(1).toString();
+            members.append(member);
+        }
+    }
+    group[Protocol::MEMBERS] = members;
+    return group;
+}
+
+QList<QJsonObject> DatabaseServer::groupsOf(int userId) {
+    QList<QJsonObject> groups;
+    QSqlQuery query = createQuery();
+    query.prepare("SELECT group_id FROM group_members WHERE user_id = :u ORDER BY group_id");
+    query.bindValue(":u", userId);
+    QList<int> ids;
+    if (query.exec()) {
+        while (query.next()) {
+            ids.append(query.value(0).toInt());
+        }
+    }
+    for (int id : ids) {
+        const QJsonObject group = groupInfo(id);
+        if (!group.isEmpty()) {
+            groups.append(group);
+        }
+    }
+    return groups;
+}
+
+QList<int> DatabaseServer::groupMemberIds(int groupId) {
+    QList<int> ids;
+    QSqlQuery query = createQuery();
+    query.prepare("SELECT user_id FROM group_members WHERE group_id = :g ORDER BY rowid");
+    query.bindValue(":g", groupId);
+    if (query.exec()) {
+        while (query.next()) {
+            ids.append(query.value(0).toInt());
+        }
+    }
+    return ids;
+}
+
+int DatabaseServer::groupCountOf(int userId) {
+    QSqlQuery query = createQuery();
+    query.prepare("SELECT COUNT(*) FROM group_members WHERE user_id = :u");
+    query.bindValue(":u", userId);
+    return query.exec() && query.next() ? query.value(0).toInt() : 0;
+}
+
+bool DatabaseServer::addGroupMembers(int groupId, const QList<int> &userIds) {
+    QSqlQuery query = createQuery();
+    for (int id : userIds) {
+        query.prepare("INSERT OR IGNORE INTO group_members (group_id, user_id) VALUES (:g, :u)");
+        query.bindValue(":g", groupId);
+        query.bindValue(":u", id);
+        if (!query.exec()) {
+            qWarning() << "Ошибка добавления участника:" << query.lastError().text();
+            return false;
+        }
+    }
+    return true;
+}
+
+bool DatabaseServer::removeGroupMember(int groupId, int userId) {
+    QSqlQuery query = createQuery();
+    query.prepare("DELETE FROM group_members WHERE group_id = :g AND user_id = :u");
+    query.bindValue(":g", groupId);
+    query.bindValue(":u", userId);
+    if (!query.exec() || query.numRowsAffected() != 1) {
+        return false;
+    }
+    query.prepare("DELETE FROM messages WHERE group_id = :g AND to_user_id = :u AND delivered = 0");
+    query.bindValue(":g", groupId);
+    query.bindValue(":u", userId);
+    query.exec();
+    return true;
+}
+
+bool DatabaseServer::renameGroup(int groupId, const QString &name) {
+    QSqlQuery query = createQuery();
+    query.prepare("UPDATE chat_groups SET name = :name WHERE id = :id");
+    query.bindValue(":name", name);
+    query.bindValue(":id", groupId);
+    return query.exec() && query.numRowsAffected() == 1;
+}
+
+bool DatabaseServer::setGroupOwner(int groupId, int ownerId) {
+    QSqlQuery query = createQuery();
+    query.prepare("UPDATE chat_groups SET owner_id = :owner WHERE id = :id");
+    query.bindValue(":owner", ownerId);
+    query.bindValue(":id", groupId);
+    return query.exec() && query.numRowsAffected() == 1;
+}
+
+bool DatabaseServer::deleteGroup(int groupId) {
+    QSqlQuery query = createQuery();
+    query.prepare("DELETE FROM messages WHERE group_id = :g AND delivered = 0");
+    query.bindValue(":g", groupId);
+    query.exec();
+    query.prepare("DELETE FROM group_members WHERE group_id = :g");
+    query.bindValue(":g", groupId);
+    query.exec();
+    query.prepare("DELETE FROM chat_groups WHERE id = :g");
+    query.bindValue(":g", groupId);
+    return query.exec();
+}
+
+int DatabaseServer::saveGroupMessage(int fromUserId, int groupId, const QString &message, const QString &clientMsgId,
+                                     bool *duplicate, const QString &fileId, QList<QPair<int, int>> *created) {
+    if (duplicate) {
+        *duplicate = false;
+    }
+    if (fromUserId <= 0 || groupId <= 0) {
+        return -1;
+    }
+
+    QSqlQuery query = createQuery();
+    if (!clientMsgId.isEmpty()) {
+        query.prepare("SELECT MIN(id) FROM messages WHERE from_user_id = :from AND client_msg_id = :cid AND group_id = :g");
+        query.bindValue(":from", fromUserId);
+        query.bindValue(":cid", clientMsgId);
+        query.bindValue(":g", groupId);
+        if (query.exec() && query.next() && !query.value(0).isNull()) {
+            if (duplicate) {
+                *duplicate = true;
+            }
+            return query.value(0).toInt();
+        }
+    }
+
+    QString fileName;
+    qint64 fileSize = 0;
+    if (!fileId.isEmpty() && !resolveAttachment(fromUserId, fileId, &fileName, &fileSize)) {
+        return -1;
+    }
+
+    QList<int> recipients = groupMemberIds(groupId);
+    recipients.removeAll(fromUserId);
+    if (recipients.isEmpty() || !m_db.transaction()) {
+        return -1;
+    }
+
+    int firstId = -1;
+    QList<QPair<int, int>> rows;
+    for (int recipient : recipients) {
+        query.prepare(
+            "INSERT INTO messages (from_user_id, to_user_id, message, delivered, client_msg_id, file_id, file_name, file_size, group_id) "
+            "VALUES (:from, :to, :msg, 0, :cid, :fid, :fname, :fsize, :g)"
+        );
+        query.bindValue(":from", fromUserId);
+        query.bindValue(":to", recipient);
+        query.bindValue(":msg", message);
+        query.bindValue(":cid", clientMsgId.isEmpty() ? QVariant(QMetaType(QMetaType::QString)) : QVariant(clientMsgId));
+        query.bindValue(":fid", fileId.isEmpty() ? QVariant(QMetaType(QMetaType::QString)) : QVariant(fileId));
+        query.bindValue(":fname", fileId.isEmpty() ? QVariant(QMetaType(QMetaType::QString)) : QVariant(fileName));
+        query.bindValue(":fsize", fileId.isEmpty() ? QVariant(QMetaType(QMetaType::LongLong)) : QVariant(fileSize));
+        query.bindValue(":g", groupId);
+        if (!query.exec()) {
+            qWarning() << "Ошибка сохранения сообщения группы:" << query.lastError().text();
+            m_db.rollback();
+            return -1;
+        }
+        const int id = query.lastInsertId().toInt();
+        if (firstId < 0) {
+            firstId = id;
+        }
+        rows.append({id, recipient});
+    }
+    if (!m_db.commit()) {
+        return -1;
+    }
+    if (created) {
+        *created = rows;
+    }
+    return firstId;
+}
+
+QList<QPair<int, int>> DatabaseServer::saveGroupNotice(int groupId, const QString &text, const QList<int> &recipients) {
+    QList<QPair<int, int>> created;
+    QSqlQuery query = createQuery();
+    for (int recipient : recipients) {
+        query.prepare(
+            "INSERT INTO messages (from_user_id, to_user_id, message, delivered, group_id) "
+            "VALUES (0, :to, :msg, 0, :g)"
+        );
+        query.bindValue(":to", recipient);
+        query.bindValue(":msg", text);
+        query.bindValue(":g", groupId);
+        if (query.exec()) {
+            created.append({query.lastInsertId().toInt(), recipient});
+        } else {
+            qWarning() << "Ошибка сохранения служебного сообщения:" << query.lastError().text();
+        }
+    }
+    return created;
 }
